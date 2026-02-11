@@ -351,6 +351,78 @@ class IntegrationService:
             fb_client_library_path=config.fb_client_library_path.strip(),
         )
 
+    def _verify_pachet_import_committed(
+        self,
+        config: AppConfig,
+        *,
+        pachet_data: dict[str, Any],
+        produce_result: dict[str, Any],
+        expected_bc_lines: int,
+    ) -> dict[str, int | bool]:
+        id_doc_raw = produce_result.get("idDoc", pachet_data.get("id_doc"))
+        nr_doc_raw = produce_result.get("nrDoc", pachet_data.get("nr_doc"))
+        data_raw = pachet_data.get("data")
+
+        if id_doc_raw in (None, "") or nr_doc_raw in (None, "") or not data_raw:
+            raise RuntimeError(
+                "Cannot verify DB insert: missing idDoc/nrDoc/data "
+                f"(idDoc={id_doc_raw}, nrDoc={nr_doc_raw}, data={data_raw})."
+            )
+
+        try:
+            id_doc_value = int(id_doc_raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Cannot verify DB insert: invalid idDoc value '{id_doc_raw}'.") from exc
+        try:
+            nr_doc_value = int(nr_doc_raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Cannot verify DB insert: invalid nrDoc value '{nr_doc_raw}'.") from exc
+        try:
+            data_value = datetime.strptime(str(data_raw), "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise RuntimeError(f"Cannot verify DB insert: invalid data value '{data_raw}'.") from exc
+
+        connection = self._connect(config)
+        try:
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+SELECT COUNT(*)
+FROM MISCARI
+WHERE ID = ?
+  AND DATA = ?
+  AND NR_DOC = ?
+  AND TIP_DOC = ?
+""".strip(),
+                [id_doc_value, data_value, nr_doc_value, "BC"],
+            )
+            actual_bc = int(cursor.fetchone()[0] or 0)
+
+            cursor.execute(
+                """
+SELECT COUNT(*)
+FROM MISCARI
+WHERE ID = ?
+  AND DATA = ?
+  AND NR_DOC = ?
+  AND TIP_DOC = ?
+""".strip(),
+                [id_doc_value, data_value, nr_doc_value, "BP"],
+            )
+            actual_bp = int(cursor.fetchone()[0] or 0)
+        finally:
+            connection.close()
+
+        expected_bp = 1
+        ok = actual_bc >= expected_bc_lines and actual_bp >= expected_bp
+        return {
+            "ok": ok,
+            "expected_bc": expected_bc_lines,
+            "actual_bc": actual_bc,
+            "expected_bp": expected_bp,
+            "actual_bp": actual_bp,
+        }
+
     def _resolve_status_update_id_query_param(self, config: AppConfig, update_url: str) -> str:
         configured = config.pachet_status_update_id_query_param.strip()
         if configured:
@@ -482,6 +554,8 @@ class IntegrationService:
             return 0
 
         db_settings = self._build_produce_pachet_db_settings(config)
+        db_target = self._build_db_target(config)
+        self.log(f"Import Pachete Saga: Firebird target is {db_target}")
         success_count = 0
         error_messages: list[str] = []
         update_url = config.pachet_status_update_api_url.strip()
@@ -508,6 +582,25 @@ class IntegrationService:
             )
             try:
                 result = producePachet(item, db_settings)
+                verification = self._verify_pachet_import_committed(
+                    config,
+                    pachet_data=pachet_data if isinstance(pachet_data, dict) else {},
+                    produce_result=result if isinstance(result, dict) else {},
+                    expected_bc_lines=len(item.get("produse", [])) if isinstance(item, dict) else 0,
+                )
+                self.log(
+                    "Import Pachete Saga: DB verification for "
+                    f"idDoc={result.get('idDoc')}, nrDoc={result.get('nrDoc')} "
+                    f"(BC {verification['actual_bc']}/{verification['expected_bc']}, "
+                    f"BP {verification['actual_bp']}/{verification['expected_bp']})."
+                )
+                if not bool(verification["ok"]):
+                    raise RuntimeError(
+                        "DB verification failed after producePachet: "
+                        f"BC {verification['actual_bc']}/{verification['expected_bc']}, "
+                        f"BP {verification['actual_bp']}/{verification['expected_bp']}."
+                    )
+
                 status_identifier = self._resolve_status_identifier(
                     pachet_data=pachet_data if isinstance(pachet_data, dict) else {},
                     produce_result=result if isinstance(result, dict) else {},

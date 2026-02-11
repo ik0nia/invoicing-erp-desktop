@@ -172,6 +172,7 @@ WHERE ACTIVE = 1
 2. Apesi **Start scheduler**
 3. Aplicatia ruleaza in bucla:
    - ia pachetele `processing` din API si executa `producePachet` in Firebird
+   - verifica imediat in DB ca exista liniile inserate in `MISCARI` (BC/BP) pentru `id_doc + data + nr_doc`
    - pentru fiecare import reusit, apeleaza API-ul de status cu `<id_param>=valoare` si `status=imported` (daca este setat)
    - ruleaza select-ul de stoc, face CSV si upload la PHP
 4. Poti testa manual cu:
