@@ -40,10 +40,8 @@ INSERT INTO ARTICOLE (
     UM,
     TVA,
     DEN_TIP,
-    TIP,
-    PRET_VANZ,
-    PRET_V_TVA
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    TIP
+) VALUES (?, ?, ?, ?, ?, ?)
 """.strip(),
     "select_max_nr_doc_bp_by_date": """
 SELECT COALESCE(MAX(NR_DOC), 0)
@@ -90,6 +88,10 @@ FROM RDB$RELATION_FIELDS rf
 JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE
 WHERE TRIM(rf.RDB$RELATION_NAME) = ?
 ORDER BY rf.RDB$FIELD_POSITION
+""".strip(),
+    "select_max_pred_det_nr": """
+SELECT COALESCE(MAX(NR), 0)
+FROM PRED_DET
 """.strip(),
     "insert_miscari_consum_bc": """
 INSERT INTO MISCARI (
@@ -427,8 +429,6 @@ def ensurePachetInArticole(cursor: Any, pachet: PachetInput) -> str:
                 pachet.cota_tva,
                 "Produse finite",
                 "04",
-                pachet.pret_vanz,
-                pachet.pret_vanz,
             ],
         )
         return code_db
@@ -516,6 +516,12 @@ def _get_next_miscari_id_u(cursor: Any) -> int:
     return current_max + 1
 
 
+def _get_next_pred_det_nr(cursor: Any) -> int:
+    cursor.execute(SQL_QUERIES["select_max_pred_det_nr"])
+    current_max = int(cursor.fetchone()[0] or 0)
+    return current_max + 1
+
+
 def _trim_db_char(value: str) -> str:
     return str(value or "").rstrip()
 
@@ -561,13 +567,12 @@ def _pred_det_field_value(
     first_produs: ProdusInput,
     cod_pachet_db: str,
     nr_doc: int,
+    pred_det_nr: int | None,
     line_no: int,
 ) -> Any | None:
     upper = field_name.upper()
     qty = abs(pachet.cantitate_produsa)
-    unit_price = Decimal("0")
-    if qty != 0:
-        unit_price = (pachet.cost_total / qty).quantize(_MONEY_Q, rounding=ROUND_HALF_UP)
+    unit_price = pachet.pret_vanz
 
     direct_values = {
         "ID_DOC": pachet.id_doc,
@@ -575,23 +580,32 @@ def _pred_det_field_value(
         "DOC_ID": pachet.id_doc,
         "ID_DOCUMENT": pachet.id_doc,
         "ID": pachet.id_doc,
+        "ID_UNIC": pachet.id_doc,
+        "IDUNIC": pachet.id_doc,
         "DATA": pachet.data,
         "DATA_DOC": pachet.data,
         "NR_DOC": nr_doc,
+        "NR": pred_det_nr,
         "TIP_DOC": "BP",
         "TIPDOC": "BP",
         "GESTIUNE": pachet.gestiune,
         "GEST": pachet.gestiune,
+        "DEN_GEST": "GESTIUNEA 1",
+        "DENGEST": "GESTIUNEA 1",
+        "DENGESTIUNE": "GESTIUNEA 1",
+        "DEN_TIP": "Produse finite",
+        "DENTIP": "Produse finite",
         "UM": "BUC",
         "UNITATE_MASURA": "BUC",
         "UNITATE": "BUC",
         "CANTITATE": qty,
         "CANT": qty,
         "QTY": qty,
-        "VALOARE": pachet.cost_total,
-        "VAL": pachet.cost_total,
-        "COST": pachet.cost_total,
+        "VALOARE": pachet.pret_vanz,
+        "VAL": pachet.pret_vanz,
+        "COST": pachet.pret_vanz,
         "PRET": unit_price,
+        "PRET_VANZ": unit_price,
         "PRET_UNITAR": unit_price,
         "COST_UNITAR": unit_price,
         "TVA": pachet.cota_tva,
@@ -637,6 +651,8 @@ def _insert_pred_det_rows(
 
     first_produs = request.produse[0]
     line_no = 1
+    has_nr_column = any(field["name"].upper() == "NR" for field in insertable_fields)
+    pred_det_nr = _get_next_pred_det_nr(cursor) if has_nr_column else None
     columns: list[str] = []
     values: list[Any] = []
     missing_required: list[str] = []
@@ -649,6 +665,7 @@ def _insert_pred_det_rows(
             first_produs=first_produs,
             cod_pachet_db=cod_pachet_db,
             nr_doc=nr_doc,
+            pred_det_nr=pred_det_nr,
             line_no=line_no,
         )
         if value is None and field["required"]:
@@ -703,39 +720,8 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
     next_id_u = _get_next_miscari_id_u(cursor) if miscari_has_id_u else None
     id_u_start = next_id_u if next_id_u is not None else None
 
-    for produs in request.produse:
-        qty_consum = -abs(produs.cantitate)
-        if miscari_has_id_u:
-            current_id_u = int(next_id_u)
-            next_id_u = current_id_u + 1
-            cursor.execute(
-                SQL_QUERIES["insert_miscari_consum_bc_with_id_u"],
-                [
-                    pachet.id_doc,
-                    current_id_u,
-                    pachet.data,
-                    nr_doc,
-                    "BC",
-                    produs.cod_articol_db,
-                    qty_consum,
-                    pachet.gestiune,
-                ],
-            )
-        else:
-            cursor.execute(
-                SQL_QUERIES["insert_miscari_consum_bc"],
-                [
-                    pachet.id_doc,
-                    pachet.data,
-                    nr_doc,
-                    "BC",
-                    produs.cod_articol_db,
-                    qty_consum,
-                    pachet.gestiune,
-                ],
-            )
-
     qty_produs = abs(pachet.cantitate_produsa)
+    # Business order requested: BP first, then BC rows.
     if miscari_has_pret and miscari_has_id_u:
         current_id_u = int(next_id_u)
         next_id_u = current_id_u + 1
@@ -796,6 +782,38 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                 pachet.gestiune,
             ],
         )
+
+    for produs in request.produse:
+        qty_consum = -abs(produs.cantitate)
+        if miscari_has_id_u:
+            current_id_u = int(next_id_u)
+            next_id_u = current_id_u + 1
+            cursor.execute(
+                SQL_QUERIES["insert_miscari_consum_bc_with_id_u"],
+                [
+                    pachet.id_doc,
+                    current_id_u,
+                    pachet.data,
+                    nr_doc,
+                    "BC",
+                    produs.cod_articol_db,
+                    qty_consum,
+                    pachet.gestiune,
+                ],
+            )
+        else:
+            cursor.execute(
+                SQL_QUERIES["insert_miscari_consum_bc"],
+                [
+                    pachet.id_doc,
+                    pachet.data,
+                    nr_doc,
+                    "BC",
+                    produs.cod_articol_db,
+                    qty_consum,
+                    pachet.gestiune,
+                ],
+            )
 
     pred_det_inserted = _insert_pred_det_rows(
         cursor=cursor,

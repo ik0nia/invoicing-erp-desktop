@@ -239,6 +239,9 @@ Caracteristici:
 - daca exista coloana `ID_U` in `MISCARI`, este setata incremental (`MAX(ID_U)+1`) pentru fiecare linie noua BC/BP
 - `NR_DOC` este calculat `MAX(NR_DOC)+1` pe aceeasi data pentru `TIP_DOC='BP'`
 - insereaza consumurile/produsul finit in `MISCARI` si 1 rand de productie in `PRED_DET` (daca tabelul exista)
+- ordinea inserarii in `MISCARI` este: intai `BP`, apoi liniile `BC`
+- la inserarea pachetului in `ARTICOLE`, `PRET_VANZ` si `PRET_V_TVA` nu sunt setate
+- in `PRED_DET`: `ID_UNIC = ID_DOC`, `NR = MAX(NR)+1`, `DEN_GEST = 'GESTIUNEA 1'`, `DEN_TIP = 'Produse finite'`, `PRET/VALOARE = pret_vanz`
 - evita dublurile: daca documentul exista deja pentru acelasi `id_doc + data`, nu mai insereaza inca o data
 - concurenta minima:
   - duplicate la inserarea in `ARTICOLE` -> recitire dupa `DENUMIRE`
