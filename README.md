@@ -98,6 +98,9 @@ Sau:
 - **Export interval (seconds)**: la cat timp ruleaza query-ul de stoc
 - **Upload URL**: endpoint PHP care primeste CSV
 - **Upload file field name**: implicit `file`
+- **Upload API token**: token separat pentru upload (optional; daca e gol se foloseste token-ul din API sync)
+- **Upload headers JSON**: headere custom pentru upload (ex: `{"X-App-Key":"abc"}`)
+- **Upload User-Agent**: util cand serverul blocheaza `python-requests/*`
 - **CSV directory**: folder local unde salveaza fisierele CSV
 - **HTTP timeout**: timeout request-uri
 - **Verify SSL**: validare certificat HTTPS
@@ -105,6 +108,14 @@ Sau:
 - **Stock SELECT SQL**: query-ul de stoc ce va fi exportat
 
 Nota: la export CSV, valorile text sunt curatate de padding-ul din dreapta (spatii/tab-uri), util pentru coloane Firebird de tip `CHAR`.
+
+Daca primesti 403 la upload, verifica:
+- endpoint-ul accepta POST multipart (nu doar GET in browser)
+- tokenul/header-ele cerute de server
+- `Upload file field name` (sa fie exact cum asteapta serverul, ex: `file` sau `csv`)
+- User-Agent (unele servere blocheaza requests default)
+
+Aplicatia afiseaza acum in log si corpul raspunsului serverului la erori HTTP (util pentru debug).
 
 Exemplu query:
 

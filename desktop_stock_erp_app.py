@@ -80,6 +80,9 @@ class AppConfig:
     stock_select_sql: str = "SELECT SKU, QTY FROM STOCKS"
     upload_url: str = ""
     upload_field_name: str = "file"
+    upload_api_token: str = ""
+    upload_headers_json: str = ""
+    upload_user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0"
     csv_directory: str = "exports"
     http_timeout_seconds: int = 30
     verify_ssl: bool = True
@@ -112,6 +115,14 @@ class AppConfig:
             stock_select_sql=str(data.get("stock_select_sql", "SELECT SKU, QTY FROM STOCKS")),
             upload_url=str(data.get("upload_url", "")),
             upload_field_name=str(data.get("upload_field_name", "file")),
+            upload_api_token=str(data.get("upload_api_token", "")),
+            upload_headers_json=str(data.get("upload_headers_json", "")),
+            upload_user_agent=str(
+                data.get(
+                    "upload_user_agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0",
+                )
+            ),
             csv_directory=str(data.get("csv_directory", "exports")),
             http_timeout_seconds=to_int(
                 data.get("http_timeout_seconds"),
@@ -354,10 +365,15 @@ class IntegrationService:
         if not url:
             raise ValueError("Upload URL is empty.")
 
-        headers = {}
-        token = config.sync_api_token.strip()
+        headers = {"Accept": "application/json"}
+        user_agent = config.upload_user_agent.strip()
+        if user_agent:
+            headers["User-Agent"] = user_agent
+
+        token = config.upload_api_token.strip() or config.sync_api_token.strip()
         if token:
             headers["Authorization"] = f"Bearer {token}"
+        headers.update(self._parse_extra_fields(config.upload_headers_json))
 
         form_data = {
             "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -381,7 +397,17 @@ class IntegrationService:
                 timeout=config.http_timeout_seconds,
                 verify=config.verify_ssl,
             )
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except requests.HTTPError as exc:
+                body = response.text.strip()
+                if len(body) > 700:
+                    body = f"{body[:700]}..."
+                if not body:
+                    body = "<empty response body>"
+                raise RuntimeError(
+                    f"Upload failed with HTTP {response.status_code}. Server response: {body}"
+                ) from exc
 
         self.log(f"CSV uploaded successfully to {url} (status {response.status_code}).")
 
@@ -499,6 +525,9 @@ class DesktopApp(tk.Tk):
         self.var_export_interval = tk.StringVar()
         self.var_upload_url = tk.StringVar()
         self.var_upload_field_name = tk.StringVar()
+        self.var_upload_api_token = tk.StringVar()
+        self.var_upload_headers_json = tk.StringVar()
+        self.var_upload_user_agent = tk.StringVar()
         self.var_csv_directory = tk.StringVar()
         self.var_http_timeout = tk.StringVar()
         self.var_verify_ssl = tk.BooleanVar()
@@ -660,25 +689,33 @@ class DesktopApp(tk.Tk):
         self._add_entry_row(frame, 1, "Export interval (seconds)", self.var_export_interval)
         self._add_entry_row(frame, 2, "Upload URL (PHP endpoint)", self.var_upload_url)
         self._add_entry_row(frame, 3, "Upload file field name", self.var_upload_field_name)
+        self._add_entry_row(frame, 4, "Upload API token (optional)", self.var_upload_api_token)
+        self._add_entry_row(
+            frame,
+            5,
+            "Upload headers JSON (optional)",
+            self.var_upload_headers_json,
+        )
+        self._add_entry_row(frame, 6, "Upload User-Agent", self.var_upload_user_agent)
 
-        ttk.Label(frame, text="CSV directory").grid(row=4, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="CSV directory").grid(row=7, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=self.var_csv_directory, width=78).grid(
-            row=4,
+            row=7,
             column=1,
             sticky="ew",
             pady=4,
         )
         ttk.Button(frame, text="Browse...", command=self._browse_csv_folder).grid(
-            row=4,
+            row=7,
             column=2,
             sticky="ew",
             padx=(6, 0),
             pady=4,
         )
 
-        self._add_entry_row(frame, 5, "HTTP timeout (seconds)", self.var_http_timeout)
+        self._add_entry_row(frame, 8, "HTTP timeout (seconds)", self.var_http_timeout)
         ttk.Checkbutton(frame, text="Verify SSL certificate", variable=self.var_verify_ssl).grid(
-            row=6,
+            row=9,
             column=0,
             columnspan=2,
             sticky="w",
@@ -686,15 +723,15 @@ class DesktopApp(tk.Tk):
         )
         self._add_entry_row(
             frame,
-            7,
+            10,
             "Extra upload fields JSON (optional)",
             self.var_extra_upload_fields,
         )
 
-        ttk.Label(frame, text="Stock SELECT SQL").grid(row=8, column=0, sticky="nw", pady=(10, 4))
+        ttk.Label(frame, text="Stock SELECT SQL").grid(row=11, column=0, sticky="nw", pady=(10, 4))
         self.txt_stock_sql = tk.Text(frame, height=10, wrap="word")
-        self.txt_stock_sql.grid(row=8, column=1, sticky="nsew", pady=(10, 4))
-        frame.rowconfigure(8, weight=1)
+        self.txt_stock_sql.grid(row=11, column=1, sticky="nsew", pady=(10, 4))
+        frame.rowconfigure(11, weight=1)
 
     def _build_logs_tab(self, frame: ttk.Frame) -> None:
         frame.columnconfigure(0, weight=1)
@@ -741,6 +778,9 @@ class DesktopApp(tk.Tk):
         self.var_export_interval.set(str(config.export_interval_seconds))
         self.var_upload_url.set(config.upload_url)
         self.var_upload_field_name.set(config.upload_field_name)
+        self.var_upload_api_token.set(config.upload_api_token)
+        self.var_upload_headers_json.set(config.upload_headers_json)
+        self.var_upload_user_agent.set(config.upload_user_agent)
         self.var_csv_directory.set(config.csv_directory)
         self.var_http_timeout.set(str(config.http_timeout_seconds))
         self.var_verify_ssl.set(config.verify_ssl)
@@ -775,6 +815,10 @@ class DesktopApp(tk.Tk):
             stock_select_sql=stock_sql,
             upload_url=self.var_upload_url.get().strip(),
             upload_field_name=upload_field,
+            upload_api_token=self.var_upload_api_token.get().strip(),
+            upload_headers_json=self.var_upload_headers_json.get().strip(),
+            upload_user_agent=self.var_upload_user_agent.get().strip()
+            or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0",
             csv_directory=self.var_csv_directory.get().strip() or "exports",
             http_timeout_seconds=timeout,
             verify_ssl=self.var_verify_ssl.get(),
