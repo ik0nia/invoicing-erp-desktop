@@ -237,7 +237,8 @@ Caracteristici:
 - o singura tranzactie (`COMMIT` la succes, `ROLLBACK` la eroare)
 - `ID_DOC` este folosit identic pentru toate inserarile in `MISCARI`
 - `NR_DOC` este calculat `MAX(NR_DOC)+1` pe aceeasi data pentru `TIP_DOC='BP'`
-- insereaza consumurile/produsul finit in `MISCARI` si detalii productie in `PRED_DET` (daca tabelul exista)
+- insereaza consumurile/produsul finit in `MISCARI` si 1 rand de productie in `PRED_DET` (daca tabelul exista)
+- evita dublurile: daca documentul exista deja pentru acelasi `id_doc + data`, nu mai insereaza inca o data
 - concurenta minima:
   - duplicate la inserarea in `ARTICOLE` -> recitire dupa `DENUMIRE`
   - conflict unic la miscari/nr_doc -> retry o singura data

@@ -422,7 +422,7 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
             pred_det_columns = {str(row[0]).upper() for row in cursor.fetchall()}
 
             actual_pred_det = 0
-            expected_pred_det = expected_bc_lines
+            expected_pred_det = 1
             pred_det_checked = False
 
             if pred_det_columns:
@@ -453,15 +453,20 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
                     where_sql = " AND ".join(where_parts)
                     cursor.execute(f"SELECT COUNT(*) FROM PRED_DET WHERE {where_sql}", params)
                     actual_pred_det = int(cursor.fetchone()[0] or 0)
+                else:
+                    # Table exists but we cannot build a safe key filter.
+                    pred_det_checked = False
         finally:
             connection.close()
 
         expected_bp = 1
         pred_det_ok = True
         if pred_det_checked:
-            pred_det_ok = actual_pred_det >= expected_pred_det
+            pred_det_ok = actual_pred_det == expected_pred_det
+        elif pred_det_columns:
+            pred_det_ok = False
 
-        ok = actual_bc >= expected_bc_lines and actual_bp >= expected_bp and pred_det_ok
+        ok = actual_bc == expected_bc_lines and actual_bp == expected_bp and pred_det_ok
         return {
             "ok": ok,
             "expected_bc": expected_bc_lines,
@@ -668,10 +673,13 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
                     cod_pachet=result.get("codPachet"),
                 )
                 success_count += 1
+                already_imported = bool(result.get("alreadyImported"))
                 self.log(
                     "Import Pachete Saga: success "
                     f"#{index}: codPachet={result.get('codPachet')}, "
-                    f"nrDoc={result.get('nrDoc')}, idDoc={result.get('idDoc')}"
+                    f"nrDoc={result.get('nrDoc')}, idDoc={result.get('idDoc')}, "
+                    f"predDetInserted={result.get('predDetInserted')}, "
+                    f"alreadyImported={already_imported}"
                 )
             except Exception as exc:  # pylint: disable=broad-except
                 message = f"Import Pachete Saga: failed #{index}: {exc}"

@@ -51,6 +51,24 @@ FROM MISCARI
 WHERE DATA = ?
   AND TIP_DOC = ?
 """.strip(),
+    "select_existing_doc_summary": """
+SELECT
+    COALESCE(MIN(NR_DOC), 0),
+    COALESCE(SUM(CASE WHEN TIP_DOC = 'BC' THEN 1 ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN TIP_DOC = 'BP' THEN 1 ELSE 0 END), 0)
+FROM MISCARI
+WHERE ID = ?
+  AND DATA = ?
+  AND TIP_DOC IN ('BC', 'BP')
+""".strip(),
+    "select_existing_bp_doc": """
+SELECT FIRST 1 NR_DOC, COD_ART
+FROM MISCARI
+WHERE ID = ?
+  AND DATA = ?
+  AND TIP_DOC = 'BP'
+ORDER BY NR_DOC DESC
+""".strip(),
     "check_miscari_has_pret_column": """
 SELECT COUNT(*)
 FROM RDB$RELATION_FIELDS
@@ -395,6 +413,52 @@ def getNextNrDoc(cursor: Any, data_doc: date) -> int:
     return max_nr + 1
 
 
+def _find_existing_document(cursor: Any, pachet: PachetInput) -> dict[str, Any] | None:
+    """
+    Detect already imported document for same (ID_DOC, DATA).
+
+    Returns existing nr_doc and pachet code when found.
+    Raises if document looks partially imported (only BC or only BP).
+    """
+    cursor.execute(SQL_QUERIES["select_existing_doc_summary"], [pachet.id_doc, pachet.data])
+    nr_doc_min, bc_count, bp_count = cursor.fetchone()
+    bc_count_int = int(bc_count or 0)
+    bp_count_int = int(bp_count or 0)
+
+    if bc_count_int == 0 and bp_count_int == 0:
+        return None
+
+    if bc_count_int == 0 or bp_count_int == 0:
+        raise RuntimeError(
+            "Existing production document is inconsistent "
+            f"(id_doc={pachet.id_doc}, data={pachet.data}, BC={bc_count_int}, BP={bp_count_int})."
+        )
+
+    cursor.execute(SQL_QUERIES["select_existing_bp_doc"], [pachet.id_doc, pachet.data])
+    bp_row = cursor.fetchone()
+    if bp_row:
+        nr_doc_existing = int(bp_row[0] or 0)
+        cod_pachet_db = str(bp_row[1] or "")
+    else:
+        nr_doc_existing = int(nr_doc_min or 0)
+        cod_pachet_db = ""
+
+    if nr_doc_existing <= 0:
+        raise RuntimeError(
+            "Existing production document has invalid NR_DOC "
+            f"(id_doc={pachet.id_doc}, data={pachet.data})."
+        )
+    if cod_pachet_db and len(cod_pachet_db) < 16:
+        cod_pachet_db = cod_pachet_db.strip().ljust(16)
+
+    return {
+        "nr_doc": nr_doc_existing,
+        "cod_pachet_db": cod_pachet_db[:16] if cod_pachet_db else "",
+        "bc_count": bc_count_int,
+        "bp_count": bp_count_int,
+    }
+
+
 def _miscari_has_pret_column(cursor: Any) -> bool:
     cursor.execute(SQL_QUERIES["check_miscari_has_pret_column"], ["MISCARI", "PRET"])
     return int(cursor.fetchone()[0] or 0) > 0
@@ -442,16 +506,16 @@ def _default_value_for_field_type(field_type: int, pachet: PachetInput) -> Any |
 def _pred_det_field_value(
     field_name: str,
     pachet: PachetInput,
-    produs: ProdusInput,
+    first_produs: ProdusInput,
     cod_pachet_db: str,
     nr_doc: int,
     line_no: int,
 ) -> Any | None:
     upper = field_name.upper()
-    qty = abs(produs.cantitate)
+    qty = abs(pachet.cantitate_produsa)
     unit_price = Decimal("0")
     if qty != 0:
-        unit_price = (produs.val_produse / qty).quantize(_MONEY_Q, rounding=ROUND_HALF_UP)
+        unit_price = (pachet.cost_total / qty).quantize(_MONEY_Q, rounding=ROUND_HALF_UP)
 
     direct_values = {
         "ID_DOC": pachet.id_doc,
@@ -472,9 +536,9 @@ def _pred_det_field_value(
         "CANTITATE": qty,
         "CANT": qty,
         "QTY": qty,
-        "VALOARE": produs.val_produse,
-        "VAL": produs.val_produse,
-        "COST": produs.val_produse,
+        "VALOARE": pachet.cost_total,
+        "VAL": pachet.cost_total,
+        "COST": pachet.cost_total,
         "PRET": unit_price,
         "PRET_UNITAR": unit_price,
         "COST_UNITAR": unit_price,
@@ -492,11 +556,11 @@ def _pred_det_field_value(
 
     if "COD" in upper:
         if any(key in upper for key in ("COMP", "MAT", "MATER", "MP")):
-            return produs.cod_articol_db
+            return first_produs.cod_articol_db
         if any(key in upper for key in ("PACH", "PF", "PRODUS")):
             return cod_pachet_db
         if upper in {"COD_ARTICOL", "COD_ART"}:
-            return produs.cod_articol_db
+            return cod_pachet_db
         return cod_pachet_db
 
     return None
@@ -519,48 +583,65 @@ def _insert_pred_det_rows(
     inserted_rows = 0
     pachet = request.pachet
 
-    for line_no, produs in enumerate(request.produse, start=1):
-        columns: list[str] = []
-        values: list[Any] = []
-        missing_required: list[str] = []
+    first_produs = request.produse[0]
+    line_no = 1
+    columns: list[str] = []
+    values: list[Any] = []
+    missing_required: list[str] = []
 
-        for field in insertable_fields:
-            field_name = field["name"]
-            value = _pred_det_field_value(
-                field_name=field_name,
-                pachet=pachet,
-                produs=produs,
-                cod_pachet_db=cod_pachet_db,
-                nr_doc=nr_doc,
-                line_no=line_no,
-            )
-            if value is None and field["required"]:
-                value = _default_value_for_field_type(field["field_type"], pachet)
-            if value is None:
-                if field["required"]:
-                    missing_required.append(field_name)
-                continue
+    for field in insertable_fields:
+        field_name = field["name"]
+        value = _pred_det_field_value(
+            field_name=field_name,
+            pachet=pachet,
+            first_produs=first_produs,
+            cod_pachet_db=cod_pachet_db,
+            nr_doc=nr_doc,
+            line_no=line_no,
+        )
+        if value is None and field["required"]:
+            value = _default_value_for_field_type(field["field_type"], pachet)
+        if value is None:
+            if field["required"]:
+                missing_required.append(field_name)
+            continue
 
-            columns.append(field_name)
-            values.append(value)
+        columns.append(field_name)
+        values.append(value)
 
-        if missing_required:
-            missing_list = ", ".join(sorted(missing_required))
-            raise RuntimeError(
-                "Cannot insert into PRED_DET. Missing required mapped columns: "
-                f"{missing_list}"
-            )
-        if not columns:
-            raise RuntimeError("Cannot insert into PRED_DET. No compatible columns were mapped.")
+    if missing_required:
+        missing_list = ", ".join(sorted(missing_required))
+        raise RuntimeError(
+            "Cannot insert into PRED_DET. Missing required mapped columns: "
+            f"{missing_list}"
+        )
+    if not columns:
+        raise RuntimeError("Cannot insert into PRED_DET. No compatible columns were mapped.")
 
-        cursor.execute(_build_dynamic_insert_sql("PRED_DET", columns), values)
-        inserted_rows += 1
+    cursor.execute(_build_dynamic_insert_sql("PRED_DET", columns), values)
+    inserted_rows += 1
 
     return inserted_rows
 
 
 def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> dict[str, Any]:
     pachet = request.pachet
+    existing = _find_existing_document(cursor, pachet)
+    if existing is not None:
+        cod_pachet_db = str(existing.get("cod_pachet_db") or "")
+        if not cod_pachet_db:
+            # Fallback if legacy rows did not have usable COD_ART.
+            cod_pachet_db = ensurePachetInArticole(cursor, pachet)
+        return {
+            "success": True,
+            "message": "producePachet skipped: document already imported.",
+            "codPachet": _trim_db_char(cod_pachet_db),
+            "nrDoc": int(existing["nr_doc"]),
+            "idDoc": pachet.id_doc,
+            "predDetInserted": 0,
+            "alreadyImported": True,
+        }
+
     cod_pachet_db = ensurePachetInArticole(cursor, pachet)
     nr_doc = getNextNrDoc(cursor, pachet.data)
     miscari_has_pret = _miscari_has_pret_column(cursor)
@@ -623,6 +704,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         "nrDoc": nr_doc,
         "idDoc": pachet.id_doc,
         "predDetInserted": pred_det_inserted,
+        "alreadyImported": False,
     }
 
 
