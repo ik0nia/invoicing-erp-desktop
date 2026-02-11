@@ -278,8 +278,8 @@ def validate_produce_pachet_input(payload: Any) -> ProducePachetInput:
 
     if pachet.id_doc <= 0:
         raise ValueError("pachet.id_doc must be > 0.")
-    if pachet.status != "pending":
-        raise ValueError("pachet.status must be 'pending'.")
+    if pachet.status not in {"pending", "processing"}:
+        raise ValueError("pachet.status must be 'processing' or 'pending'.")
     if pachet.cantitate_produsa <= 0:
         raise ValueError("pachet.cantitate_produsa must be > 0.")
     if pachet.pret_vanz < 0:
