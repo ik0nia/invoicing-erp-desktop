@@ -66,6 +66,9 @@ python desktop_stock_erp_app.py
 - **Enable Import Pachete Saga job**: activeaza jobul de import periodic
 - **Import API URL**: endpoint de unde aplicatia citeste pachetele de importat (`producePachet`)
 - **Import API token**: optional (Bearer token)
+- **Import token query param**: daca API cere token in query string, ex. `token`
+- **Import headers JSON**: headere custom pentru import (ex: `{"X-Api-Key":"abc"}`)
+- **Import User-Agent**: util cand API-ul blocheaza user-agent-ul default
 - **Import interval (seconds)**: la cat timp sa ruleze
 
 Payload suportat:
@@ -88,6 +91,12 @@ Payload suportat:
   ]
 }
 ```
+
+Exemplu pentru endpoint care cere token in query:
+
+- Import API URL: `https://deon.ro/erp/api/pachete/import`
+- Import API token: `ParolaToken123!`
+- Import token query param: `token`
 
 Sau lista:
 

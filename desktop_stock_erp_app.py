@@ -85,6 +85,9 @@ class AppConfig:
     sync_interval_seconds: int = 120
     pachet_import_api_url: str = ""
     sync_api_token: str = ""
+    pachet_import_token_query_param: str = ""
+    pachet_import_headers_json: str = ""
+    pachet_import_user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0"
     enable_export_job: bool = True
     export_interval_seconds: int = 300
     stock_select_sql: str = "SELECT SKU, QTY FROM STOCKS"
@@ -118,6 +121,14 @@ class AppConfig:
             ),
             pachet_import_api_url=str(data.get("pachet_import_api_url", "")),
             sync_api_token=str(data.get("sync_api_token", "")),
+            pachet_import_token_query_param=str(data.get("pachet_import_token_query_param", "")),
+            pachet_import_headers_json=str(data.get("pachet_import_headers_json", "")),
+            pachet_import_user_agent=str(
+                data.get(
+                    "pachet_import_user_agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0",
+                )
+            ),
             enable_export_job=to_bool(data.get("enable_export_job"), default=True),
             export_interval_seconds=to_int(
                 data.get("export_interval_seconds"),
@@ -246,22 +257,46 @@ class IntegrationService:
         *,
         url: str,
         token: str,
+        token_query_param: str,
+        headers_json: str,
+        user_agent: str,
         config: AppConfig,
         job_name: str,
     ) -> Any:
         headers = {"Accept": "application/json"}
-        if token:
+        ua = user_agent.strip()
+        if ua:
+            headers["User-Agent"] = ua
+        headers.update(self._parse_extra_fields(headers_json))
+
+        final_url = url
+        if token and token_query_param:
+            final_url = self._with_query_param(url, token_query_param, token)
+        elif token:
             headers["Authorization"] = f"Bearer {token}"
 
-        self.log(f"Fetching {job_name} payload from API: {self._sanitize_url_for_log(url)}")
+        self.log(f"Fetching {job_name} payload from API: {self._sanitize_url_for_log(final_url)}")
         response = requests.get(
-            url,
+            final_url,
             headers=headers,
             timeout=config.http_timeout_seconds,
             verify=config.verify_ssl,
         )
-        response.raise_for_status()
-        return response.json()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            raise RuntimeError(
+                f"{job_name} API failed with HTTP {response.status_code}. "
+                f"Server response: {self._format_http_response_for_log(response)}"
+            ) from exc
+
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                f"{job_name} API returned non-JSON response. "
+                f"Response: {self._format_http_response_for_log(response)}"
+            ) from exc
 
     @staticmethod
     def _extract_pachet_requests(payload: Any) -> list[dict[str, Any]]:
@@ -323,6 +358,9 @@ class IntegrationService:
         payload = self._fetch_json_from_api(
             url=url,
             token=config.sync_api_token.strip(),
+            token_query_param=config.pachet_import_token_query_param.strip(),
+            headers_json=config.pachet_import_headers_json.strip(),
+            user_agent=config.pachet_import_user_agent.strip(),
             config=config,
             job_name="Import Pachete Saga",
         )
@@ -803,6 +841,9 @@ class DesktopApp(tk.Tk):
         self.var_sync_enabled = tk.BooleanVar()
         self.var_pachet_import_api_url = tk.StringVar()
         self.var_sync_api_token = tk.StringVar()
+        self.var_pachet_import_token_query_param = tk.StringVar()
+        self.var_pachet_import_headers_json = tk.StringVar()
+        self.var_pachet_import_user_agent = tk.StringVar()
         self.var_sync_interval = tk.StringVar()
 
         self.var_export_enabled = tk.BooleanVar()
@@ -951,7 +992,20 @@ class DesktopApp(tk.Tk):
         )
         self._add_entry_row(frame, 1, "Import API URL", self.var_pachet_import_api_url)
         self._add_entry_row(frame, 2, "Import API token (optional)", self.var_sync_api_token)
-        self._add_entry_row(frame, 3, "Import interval (seconds)", self.var_sync_interval)
+        self._add_entry_row(
+            frame,
+            3,
+            "Import token query param (optional, ex: token)",
+            self.var_pachet_import_token_query_param,
+        )
+        self._add_entry_row(
+            frame,
+            4,
+            "Import headers JSON (optional)",
+            self.var_pachet_import_headers_json,
+        )
+        self._add_entry_row(frame, 5, "Import User-Agent", self.var_pachet_import_user_agent)
+        self._add_entry_row(frame, 6, "Import interval (seconds)", self.var_sync_interval)
 
         payload_help = (
             "Expected payload:\n"
@@ -959,7 +1013,7 @@ class DesktopApp(tk.Tk):
             "or {\"pachete\": [ ... ]}."
         )
         ttk.Label(frame, text=payload_help, wraplength=780, foreground="#4B5563").grid(
-            row=4,
+            row=7,
             column=0,
             columnspan=2,
             sticky="w",
@@ -1069,6 +1123,9 @@ class DesktopApp(tk.Tk):
         self.var_sync_enabled.set(config.enable_sync_job)
         self.var_pachet_import_api_url.set(config.pachet_import_api_url)
         self.var_sync_api_token.set(config.sync_api_token)
+        self.var_pachet_import_token_query_param.set(config.pachet_import_token_query_param)
+        self.var_pachet_import_headers_json.set(config.pachet_import_headers_json)
+        self.var_pachet_import_user_agent.set(config.pachet_import_user_agent)
         self.var_sync_interval.set(str(config.sync_interval_seconds))
 
         self.var_export_enabled.set(config.enable_export_job)
@@ -1109,6 +1166,10 @@ class DesktopApp(tk.Tk):
             sync_interval_seconds=sync_interval,
             pachet_import_api_url=self.var_pachet_import_api_url.get().strip(),
             sync_api_token=self.var_sync_api_token.get().strip(),
+            pachet_import_token_query_param=self.var_pachet_import_token_query_param.get().strip(),
+            pachet_import_headers_json=self.var_pachet_import_headers_json.get().strip(),
+            pachet_import_user_agent=self.var_pachet_import_user_agent.get().strip()
+            or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0",
             enable_export_job=self.var_export_enabled.get(),
             export_interval_seconds=export_interval,
             stock_select_sql=stock_sql,
