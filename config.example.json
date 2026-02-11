@@ -1,0 +1,21 @@
+{
+  "db_path": "C:\\\\databases\\\\company.fdb",
+  "db_host": "localhost",
+  "db_port": 3050,
+  "db_user": "SYSDBA",
+  "db_password": "masterkey",
+  "db_charset": "UTF8",
+  "enable_sync_job": true,
+  "sync_interval_seconds": 120,
+  "sync_api_url": "https://api.example.com/firebird-sync-commands",
+  "sync_api_token": "",
+  "enable_export_job": true,
+  "export_interval_seconds": 300,
+  "stock_select_sql": "SELECT SKU, QTY_AVAILABLE FROM STOCKS WHERE ACTIVE = 1",
+  "upload_url": "https://example.com/upload_stock.php",
+  "upload_field_name": "file",
+  "csv_directory": "exports",
+  "http_timeout_seconds": 30,
+  "verify_ssl": true,
+  "extra_upload_fields_json": "{\"source\":\"desktop-sync\"}"
+}

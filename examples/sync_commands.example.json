@@ -1,0 +1,12 @@
+{
+  "commands": [
+    {
+      "sql": "INSERT INTO STOCK_UPDATES(ID, SKU, QTY, UPDATED_AT) VALUES (?, ?, ?, ?)",
+      "params": [101, "SKU-001", 25, "2026-02-11 10:00:00"]
+    },
+    {
+      "sql": "INSERT INTO STOCK_UPDATES(ID, SKU, QTY, UPDATED_AT) VALUES (?, ?, ?, ?)",
+      "params": [102, "SKU-002", 10, "2026-02-11 10:00:00"]
+    }
+  ]
+}

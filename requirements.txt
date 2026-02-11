@@ -1,0 +1,2 @@
+firebird-driver
+requests
