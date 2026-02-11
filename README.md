@@ -104,6 +104,8 @@ Sau:
 - **Extra upload fields JSON**: campuri suplimentare trimise in POST
 - **Stock SELECT SQL**: query-ul de stoc ce va fi exportat
 
+Nota: la export CSV, valorile text sunt curatate de padding-ul din dreapta (spatii/tab-uri), util pentru coloane Firebird de tip `CHAR`.
+
 Exemplu query:
 
 ```sql

@@ -320,6 +320,14 @@ class IntegrationService:
             raise ValueError("Extra upload fields must be a JSON object.")
         return {str(key): str(value) for key, value in parsed.items()}
 
+    @staticmethod
+    def _normalize_csv_value(value: Any) -> Any:
+        """Remove right-side padding from text values before CSV export."""
+        if isinstance(value, str):
+            # Firebird CHAR columns are often right-padded with spaces.
+            return value.rstrip(" \t")
+        return value
+
     def _write_csv(
         self,
         config: AppConfig,
@@ -334,8 +342,9 @@ class IntegrationService:
         with csv_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
             if headers:
-                writer.writerow(headers)
-            writer.writerows(rows)
+                writer.writerow([self._normalize_csv_value(value) for value in headers])
+            for row in rows:
+                writer.writerow([self._normalize_csv_value(value) for value in row])
 
         self.log(f"CSV generated: {csv_path}")
         return csv_path
