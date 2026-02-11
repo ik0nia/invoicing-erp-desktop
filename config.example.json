@@ -1,10 +1,11 @@
 {
   "db_path": "C:\\\\databases\\\\company.fdb",
-  "db_host": "localhost",
+  "db_host": "",
   "db_port": 3050,
   "db_user": "SYSDBA",
   "db_password": "masterkey",
   "db_charset": "UTF8",
+  "fb_client_library_path": "C:\\\\Program Files\\\\Firebird\\\\Firebird_3_0\\\\fbclient.dll",
   "enable_sync_job": true,
   "sync_interval_seconds": 120,
   "sync_api_url": "https://api.example.com/firebird-sync-commands",

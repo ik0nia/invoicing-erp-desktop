@@ -55,10 +55,11 @@ python desktop_stock_erp_app.py
 ### 1) Tab Firebird
 
 - **Database file (.fdb)**: alegi fisierul bazei
-- **Host**: de regula `localhost` (sau gol pentru embedded)
-- **Port**: `3050`
+- **Host**: lasa gol pentru conexiune directa la fisier (`embedded`); completeaza doar daca folosesti server Firebird
+- **Port**: `3050` (conteaza doar cand Host este setat)
 - **User/Password**: ex. `SYSDBA` / `masterkey`
 - **Charset**: ex. `UTF8`
+- **Firebird client library (fbclient.dll)**: optional, dar recomandat daca aplicatia nu gaseste automat clientul Firebird
 
 ### 2) Tab API sync
 
@@ -160,4 +161,5 @@ Executabilul rezultat va fi in `dist/desktop_stock_erp_app.exe`.
 
 - Pe PC-ul unde ruleaza aplicatia trebuie sa existe clientul Firebird (`fbclient.dll`).
 - Daca folosesti server Firebird, verifica accesul la baza si firewall-ul pentru portul 3050.
-- Pentru embedded/local poti lasa host gol si selecta direct fisierul `.fdb`.
+- Pentru embedded/local lasa host gol si selecteaza direct fisierul `.fdb`.
+- Daca apare eroarea "client library could not be determined", seteaza explicit calea la `fbclient.dll` in tab-ul Firebird.

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import queue
 import threading
 import time
@@ -26,8 +27,10 @@ else:
 
 try:
     from firebird.driver import connect as fb_connect
+    from firebird.driver import driver_config as fb_driver_config
 except Exception as exc:  # pragma: no cover - import guard
     fb_connect = None
+    fb_driver_config = None
     FIREBIRD_IMPORT_ERROR = exc
 else:
     FIREBIRD_IMPORT_ERROR = None
@@ -62,11 +65,12 @@ def to_bool(value: Any, default: bool) -> bool:
 @dataclass
 class AppConfig:
     db_path: str = ""
-    db_host: str = "localhost"
+    db_host: str = ""
     db_port: int = 3050
     db_user: str = "SYSDBA"
     db_password: str = "masterkey"
     db_charset: str = "UTF8"
+    fb_client_library_path: str = ""
     enable_sync_job: bool = True
     sync_interval_seconds: int = 120
     sync_api_url: str = ""
@@ -85,11 +89,12 @@ class AppConfig:
     def from_dict(cls, data: dict[str, Any]) -> "AppConfig":
         return cls(
             db_path=str(data.get("db_path", "")),
-            db_host=str(data.get("db_host", "localhost")),
+            db_host=str(data.get("db_host", "")),
             db_port=to_int(data.get("db_port"), default=3050, minimum=1),
             db_user=str(data.get("db_user", "SYSDBA")),
             db_password=str(data.get("db_password", "masterkey")),
             db_charset=str(data.get("db_charset", "UTF8")),
+            fb_client_library_path=str(data.get("fb_client_library_path", "")),
             enable_sync_job=to_bool(data.get("enable_sync_job"), default=True),
             sync_interval_seconds=to_int(
                 data.get("sync_interval_seconds"),
@@ -145,6 +150,7 @@ class IntegrationService:
 
     def __init__(self, log_fn: Callable[[str], None]) -> None:
         self.log = log_fn
+        self._dll_dir_handles: list[Any] = []
 
     def _ensure_dependencies(self) -> None:
         if requests is None:
@@ -163,15 +169,44 @@ class IntegrationService:
             return f"{host}/{config.db_port}:{db_path}"
         return db_path
 
+    def _configure_client_library(self, config: AppConfig) -> None:
+        library_raw = config.fb_client_library_path.strip()
+        if not library_raw:
+            return
+
+        library_path = Path(library_raw).expanduser()
+        if not library_path.exists():
+            raise ValueError(f"Firebird client library file was not found: {library_path}")
+
+        if fb_driver_config is not None:
+            fb_driver_config.fb_client_library.value = str(library_path)
+
+        # On Windows make sure folder containing fbclient.dll is discoverable by loader.
+        if os.name == "nt" and hasattr(os, "add_dll_directory"):
+            handle = os.add_dll_directory(str(library_path.parent))
+            self._dll_dir_handles.append(handle)
+
     def _connect(self, config: AppConfig):
         target = self._build_db_target(config)
         self.log(f"Connecting to Firebird at: {target}")
-        return fb_connect(
-            database=target,
-            user=config.db_user.strip(),
-            password=config.db_password,
-            charset=config.db_charset.strip() or "UTF8",
-        )
+        self._configure_client_library(config)
+        try:
+            return fb_connect(
+                database=target,
+                user=config.db_user.strip(),
+                password=config.db_password,
+                charset=config.db_charset.strip() or "UTF8",
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            message = str(exc)
+            lowered = message.lower()
+            if "client library" in lowered or "fbclient" in lowered:
+                raise RuntimeError(
+                    "Firebird client library is missing. "
+                    "Set 'Firebird client library (fbclient.dll)' in Firebird tab "
+                    "or install Firebird client and add it to PATH."
+                ) from exc
+            raise
 
     @staticmethod
     def _parse_commands(payload: Any) -> list[dict[str, Any]]:
@@ -444,6 +479,7 @@ class DesktopApp(tk.Tk):
         self.var_db_user = tk.StringVar()
         self.var_db_password = tk.StringVar()
         self.var_db_charset = tk.StringVar()
+        self.var_fb_client_library = tk.StringVar()
 
         self.var_sync_enabled = tk.BooleanVar()
         self.var_sync_api_url = tk.StringVar()
@@ -542,12 +578,33 @@ class DesktopApp(tk.Tk):
         self._add_entry_row(frame, 4, "Password", self.var_db_password, show="*")
         self._add_entry_row(frame, 5, "Charset", self.var_db_charset)
 
+        ttk.Label(frame, text="Firebird client library (fbclient.dll)").grid(
+            row=6,
+            column=0,
+            sticky="w",
+            pady=4,
+        )
+        ttk.Entry(frame, textvariable=self.var_fb_client_library, width=78).grid(
+            row=6,
+            column=1,
+            sticky="ew",
+            pady=4,
+        )
+        ttk.Button(frame, text="Browse...", command=self._browse_fb_client_library).grid(
+            row=6,
+            column=2,
+            sticky="ew",
+            padx=(6, 0),
+            pady=4,
+        )
+
         note = (
-            "Tip: for local file through Firebird server use host=localhost and "
-            "select your .fdb path. If you use embedded mode, leave host empty."
+            "Tip: leave Host empty for direct file connection (embedded). "
+            "Set Host + Port only when you want server mode. "
+            "If you get client library errors, select fbclient.dll."
         )
         ttk.Label(frame, text=note, wraplength=780, foreground="#4B5563").grid(
-            row=6,
+            row=7,
             column=0,
             columnspan=3,
             sticky="w",
@@ -644,6 +701,14 @@ class DesktopApp(tk.Tk):
         if selected:
             self.var_db_path.set(selected)
 
+    def _browse_fb_client_library(self) -> None:
+        selected = filedialog.askopenfilename(
+            title="Select Firebird client library",
+            filetypes=[("Firebird client library", "fbclient.dll"), ("DLL files", "*.dll"), ("All files", "*.*")],
+        )
+        if selected:
+            self.var_fb_client_library.set(selected)
+
     def _browse_csv_folder(self) -> None:
         selected = filedialog.askdirectory(title="Select CSV output folder")
         if selected:
@@ -656,6 +721,7 @@ class DesktopApp(tk.Tk):
         self.var_db_user.set(config.db_user)
         self.var_db_password.set(config.db_password)
         self.var_db_charset.set(config.db_charset)
+        self.var_fb_client_library.set(config.fb_client_library_path)
 
         self.var_sync_enabled.set(config.enable_sync_job)
         self.var_sync_api_url.set(config.sync_api_url)
@@ -690,6 +756,7 @@ class DesktopApp(tk.Tk):
             db_user=self.var_db_user.get().strip() or "SYSDBA",
             db_password=self.var_db_password.get(),
             db_charset=self.var_db_charset.get().strip() or "UTF8",
+            fb_client_library_path=self.var_fb_client_library.get().strip(),
             enable_sync_job=self.var_sync_enabled.get(),
             sync_interval_seconds=sync_interval,
             sync_api_url=self.var_sync_api_url.get().strip(),
