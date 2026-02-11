@@ -433,7 +433,7 @@ WHERE ID = ?
   AND NR_DOC = ?
   AND TIP_DOC IN ('BC', 'BP')
 """.strip(),
-                [id_doc_value, data_value, nr_doc_value],
+                [miscari_id_value, data_value, nr_doc_value],
             )
             bc_pos_count, bc_neg_count, bp_pos_count, bp_neg_count = cursor.fetchone()
             bc_pos_count_int = int(bc_pos_count or 0)
