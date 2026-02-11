@@ -359,16 +359,25 @@ class IntegrationService:
         produce_result: dict[str, Any],
         expected_bc_lines: int,
     ) -> dict[str, int | bool]:
+        miscari_id_raw = produce_result.get("miscariId")
         id_doc_raw = produce_result.get("idDoc", pachet_data.get("id_doc"))
         nr_doc_raw = produce_result.get("nrDoc", pachet_data.get("nr_doc"))
         data_raw = pachet_data.get("data")
 
-        if id_doc_raw in (None, "") or nr_doc_raw in (None, "") or not data_raw:
+        if nr_doc_raw in (None, "") or not data_raw:
             raise RuntimeError(
-                "Cannot verify DB insert: missing idDoc/nrDoc/data "
-                f"(idDoc={id_doc_raw}, nrDoc={nr_doc_raw}, data={data_raw})."
+                "Cannot verify DB insert: missing nrDoc/data "
+                f"(nrDoc={nr_doc_raw}, data={data_raw})."
             )
 
+        if miscari_id_raw in (None, ""):
+            miscari_id_raw = id_doc_raw
+        try:
+            miscari_id_value = int(miscari_id_raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Cannot verify DB insert: invalid miscariId value '{miscari_id_raw}'."
+            ) from exc
         try:
             id_doc_value = int(id_doc_raw)
         except (TypeError, ValueError) as exc:
@@ -394,7 +403,7 @@ WHERE ID = ?
   AND NR_DOC = ?
   AND TIP_DOC = ?
 """.strip(),
-                [id_doc_value, data_value, nr_doc_value, "BC"],
+                [miscari_id_value, data_value, nr_doc_value, "BC"],
             )
             actual_bc = int(cursor.fetchone()[0] or 0)
 
@@ -407,7 +416,7 @@ WHERE ID = ?
   AND NR_DOC = ?
   AND TIP_DOC = ?
 """.strip(),
-                [id_doc_value, data_value, nr_doc_value, "BP"],
+                [miscari_id_value, data_value, nr_doc_value, "BP"],
             )
             actual_bp = int(cursor.fetchone()[0] or 0)
 
@@ -471,7 +480,7 @@ WHERE ID = ?
   AND NR_DOC = ?
   AND TIP_DOC IN ('BC', 'BP')
 """.strip(),
-                    [id_doc_value, data_value, nr_doc_value],
+                    [miscari_id_value, data_value, nr_doc_value],
                 )
                 min_id_u, max_id_u, distinct_count = cursor.fetchone()
                 if min_id_u is not None:
@@ -511,7 +520,10 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
                 where_parts: list[str] = []
                 params: list[Any] = []
 
-                if "ID_DOC" in pred_det_columns:
+                if "ID_UNIC" in pred_det_columns:
+                    where_parts.append("ID_UNIC = ?")
+                    params.append(id_doc_value)
+                elif "ID_DOC" in pred_det_columns:
                     where_parts.append("ID_DOC = ?")
                     params.append(id_doc_value)
                 elif "ID" in pred_det_columns:
@@ -573,6 +585,7 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
         )
         return {
             "ok": ok,
+            "miscari_id": miscari_id_value,
             "expected_bc": expected_bc_lines,
             "actual_bc": actual_bc,
             "expected_bp": expected_bp,
@@ -758,7 +771,7 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
                 )
                 self.log(
                     "Import Pachete Saga: DB verification for "
-                    f"idDoc={result.get('idDoc')}, nrDoc={result.get('nrDoc')} "
+                    f"idDoc={result.get('idDoc')}, miscariId={verification['miscari_id']}, nrDoc={result.get('nrDoc')} "
                     f"(storno={verification['is_storno']}, "
                     f"BC+={verification['bc_pos_count']}, BC-={verification['bc_neg_count']}, "
                     f"BP+={verification['bp_pos_count']}, BP-={verification['bp_neg_count']}), "
@@ -774,6 +787,7 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
                 if not bool(verification["ok"]):
                     raise RuntimeError(
                         "DB verification failed after producePachet: "
+                        f"miscariId={verification['miscari_id']}, "
                         f"storno={verification['is_storno']}, "
                         f"BC+={verification['bc_pos_count']}, BC-={verification['bc_neg_count']}, "
                         f"BP+={verification['bp_pos_count']}, BP-={verification['bp_neg_count']}, "
@@ -805,6 +819,7 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
                     "Import Pachete Saga: success "
                     f"#{index}: codPachet={result.get('codPachet')}, "
                     f"nrDoc={result.get('nrDoc')}, idDoc={result.get('idDoc')}, "
+                    f"miscariId={result.get('miscariId')}, "
                     f"predDetInserted={result.get('predDetInserted')}, "
                     f"alreadyImported={already_imported}"
                 )

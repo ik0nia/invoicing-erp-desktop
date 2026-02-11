@@ -235,8 +235,9 @@ Caracteristici:
 - validare input JSON (campuri obligatorii + tipuri)
 - query-uri parametrizate (`?`) pentru toate operatiile
 - o singura tranzactie (`COMMIT` la succes, `ROLLBACK` la eroare)
-- `ID_DOC` este folosit identic pentru toate inserarile in `MISCARI`
+- `ID_DOC` din payload este pastrat pentru legatura externa (status/API/PRED_DET)
 - daca exista coloana `ID_U` in `MISCARI`, este setata incremental (`MAX(ID_U)+1`) pentru fiecare linie noua BC/BP
+- coloana `ID` din `MISCARI` este alocata ca `MAX(ID)+1` pe linia `BP`, iar liniile `BC` folosesc acelasi `ID`
 - `NR_DOC` este calculat `MAX(NR_DOC)+1` pe aceeasi data pentru `TIP_DOC='BP'`
 - insereaza consumurile/produsul finit in `MISCARI` si 1 rand de productie in `PRED_DET` (daca tabelul exista)
 - ordinea inserarii in `MISCARI` este: intai `BP`, apoi liniile `BC`

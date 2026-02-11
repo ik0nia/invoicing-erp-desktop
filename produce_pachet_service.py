@@ -60,12 +60,35 @@ WHERE ID = ?
   AND TIP_DOC IN ('BC', 'BP')
 """.strip(),
     "select_existing_bp_doc": """
-SELECT FIRST 1 NR_DOC, COD_ART
+SELECT FIRST 1 ID, NR_DOC, COD_ART
 FROM MISCARI
 WHERE ID = ?
   AND DATA = ?
   AND TIP_DOC = 'BP'
 ORDER BY NR_DOC DESC
+""".strip(),
+    "select_pred_det_existing_nr_doc_by_id_unic": """
+SELECT FIRST 1 NR_DOC
+FROM PRED_DET
+WHERE ID_UNIC = ?
+ORDER BY NR_DOC DESC
+""".strip(),
+    "select_doc_counts_by_date_nr_doc": """
+SELECT
+    COALESCE(SUM(CASE WHEN TIP_DOC = 'BC' THEN 1 ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN TIP_DOC = 'BP' THEN 1 ELSE 0 END), 0)
+FROM MISCARI
+WHERE DATA = ?
+  AND NR_DOC = ?
+  AND TIP_DOC IN ('BC', 'BP')
+""".strip(),
+    "select_bp_doc_by_date_nr_doc": """
+SELECT FIRST 1 ID, COD_ART
+FROM MISCARI
+WHERE DATA = ?
+  AND NR_DOC = ?
+  AND TIP_DOC = 'BP'
+ORDER BY ID DESC
 """.strip(),
     "check_miscari_has_pret_column": """
 SELECT COUNT(*)
@@ -75,6 +98,10 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
 """.strip(),
     "select_max_miscari_id_u": """
 SELECT COALESCE(MAX(ID_U), 0)
+FROM MISCARI
+""".strip(),
+    "select_max_miscari_id": """
+SELECT COALESCE(MAX(ID), 0)
 FROM MISCARI
 """.strip(),
     "select_relation_fields": """
@@ -481,38 +508,55 @@ def _find_existing_document(cursor: Any, pachet: PachetInput) -> dict[str, Any] 
     Returns existing nr_doc and pachet code when found.
     Raises if document looks partially imported (only BC or only BP).
     """
-    cursor.execute(SQL_QUERIES["select_existing_doc_summary"], [pachet.id_doc, pachet.data])
-    nr_doc_min, bc_count, bp_count = cursor.fetchone()
+    # MISCARI.ID is now generated as MAX(ID)+1, so the stable external link
+    # for idempotency is PRED_DET.ID_UNIC (payload id_doc).
+    try:
+        cursor.execute(SQL_QUERIES["select_pred_det_existing_nr_doc_by_id_unic"], [pachet.id_doc])
+        pred_row = cursor.fetchone()
+    except Exception:
+        pred_row = None
+
+    if not pred_row:
+        return None
+
+    nr_doc_existing = int(pred_row[0] or 0)
+    if nr_doc_existing <= 0:
+        return None
+
+    cursor.execute(
+        SQL_QUERIES["select_doc_counts_by_date_nr_doc"],
+        [pachet.data, nr_doc_existing],
+    )
+    bc_count, bp_count = cursor.fetchone()
     bc_count_int = int(bc_count or 0)
     bp_count_int = int(bp_count or 0)
 
     if bc_count_int == 0 and bp_count_int == 0:
         return None
-
     if bc_count_int == 0 or bp_count_int == 0:
         raise RuntimeError(
             "Existing production document is inconsistent "
             f"(id_doc={pachet.id_doc}, data={pachet.data}, BC={bc_count_int}, BP={bp_count_int})."
         )
 
-    cursor.execute(SQL_QUERIES["select_existing_bp_doc"], [pachet.id_doc, pachet.data])
+    cursor.execute(
+        SQL_QUERIES["select_bp_doc_by_date_nr_doc"],
+        [pachet.data, nr_doc_existing],
+    )
     bp_row = cursor.fetchone()
-    if bp_row:
-        nr_doc_existing = int(bp_row[0] or 0)
-        cod_pachet_db = str(bp_row[1] or "")
-    else:
-        nr_doc_existing = int(nr_doc_min or 0)
-        cod_pachet_db = ""
-
-    if nr_doc_existing <= 0:
+    if not bp_row:
         raise RuntimeError(
-            "Existing production document has invalid NR_DOC "
-            f"(id_doc={pachet.id_doc}, data={pachet.data})."
+            "Existing production document was found in PRED_DET but BP row is missing in MISCARI "
+            f"(id_doc={pachet.id_doc}, data={pachet.data}, nr_doc={nr_doc_existing})."
         )
+
+    miscari_id_existing = int(bp_row[0] or 0)
+    cod_pachet_db = str(bp_row[1] or "")
     if cod_pachet_db and len(cod_pachet_db) < 16:
         cod_pachet_db = cod_pachet_db.strip().ljust(16)
 
     return {
+        "miscari_id": miscari_id_existing,
         "nr_doc": nr_doc_existing,
         "cod_pachet_db": cod_pachet_db[:16] if cod_pachet_db else "",
         "bc_count": bc_count_int,
@@ -532,6 +576,12 @@ def _miscari_has_id_u_column(cursor: Any) -> bool:
 
 def _get_next_miscari_id_u(cursor: Any) -> int:
     cursor.execute(SQL_QUERIES["select_max_miscari_id_u"])
+    current_max = int(cursor.fetchone()[0] or 0)
+    return current_max + 1
+
+
+def _get_next_miscari_id(cursor: Any) -> int:
+    cursor.execute(SQL_QUERIES["select_max_miscari_id"])
     current_max = int(cursor.fetchone()[0] or 0)
     return current_max + 1
 
@@ -739,6 +789,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
             "codPachet": _trim_db_char(cod_pachet_db),
             "nrDoc": int(existing["nr_doc"]),
             "idDoc": pachet.id_doc,
+            "miscariId": int(existing.get("miscari_id") or 0),
             "predDetInserted": 0,
             "alreadyImported": True,
             "idUStart": None,
@@ -746,6 +797,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         }
 
     cod_pachet_db = ensurePachetInArticole(cursor, pachet, allow_create=not is_storno)
+    miscari_doc_id = _get_next_miscari_id(cursor)
     nr_doc = getNextNrDoc(cursor, pachet.data)
     miscari_has_pret = _miscari_has_pret_column(cursor)
     miscari_has_id_u = _miscari_has_id_u_column(cursor)
@@ -761,7 +813,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         cursor.execute(
             SQL_QUERIES["insert_miscari_produs_bp_with_pret_and_id_u"],
             [
-                pachet.id_doc,
+                    miscari_doc_id,
                 current_id_u,
                 pachet.data,
                 nr_doc,
@@ -776,7 +828,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         cursor.execute(
             SQL_QUERIES["insert_miscari_produs_bp_with_pret"],
             [
-                pachet.id_doc,
+                miscari_doc_id,
                 pachet.data,
                 nr_doc,
                 "BP",
@@ -792,7 +844,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         cursor.execute(
             SQL_QUERIES["insert_miscari_produs_bp_without_pret_and_id_u"],
             [
-                pachet.id_doc,
+                miscari_doc_id,
                 current_id_u,
                 pachet.data,
                 nr_doc,
@@ -806,7 +858,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         cursor.execute(
             SQL_QUERIES["insert_miscari_produs_bp_without_pret"],
             [
-                pachet.id_doc,
+                miscari_doc_id,
                 pachet.data,
                 nr_doc,
                 "BP",
@@ -824,7 +876,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
             cursor.execute(
                 SQL_QUERIES["insert_miscari_consum_bc_with_id_u"],
                 [
-                    pachet.id_doc,
+                    miscari_doc_id,
                     current_id_u,
                     pachet.data,
                     nr_doc,
@@ -838,7 +890,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
             cursor.execute(
                 SQL_QUERIES["insert_miscari_consum_bc"],
                 [
-                    pachet.id_doc,
+                    miscari_doc_id,
                     pachet.data,
                     nr_doc,
                     "BC",
@@ -862,6 +914,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         "codPachet": _trim_db_char(cod_pachet_db),
         "nrDoc": nr_doc,
         "idDoc": pachet.id_doc,
+        "miscariId": miscari_doc_id,
         "predDetInserted": pred_det_inserted,
         "alreadyImported": False,
         "idUStart": id_u_start,
