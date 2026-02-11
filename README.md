@@ -189,3 +189,84 @@ Executabilul rezultat va fi in `dist/desktop_stock_erp_app.exe`.
 - Daca folosesti server Firebird, verifica accesul la baza si firewall-ul pentru portul 3050.
 - Pentru embedded/local lasa host gol si selecteaza direct fisierul `.fdb`.
 - Daca apare eroarea "client library could not be determined", seteaza explicit calea la `fbclient.dll` in tab-ul Firebird.
+
+---
+
+## Functia `producePachet` (tranzactie unica, fara EXECUTE BLOCK)
+
+Am adaugat implementarea in:
+
+- `produce_pachet_service.py`
+
+Functia principala:
+
+- `producePachet(payload, db_settings)`
+
+Caracteristici:
+
+- validare input JSON (campuri obligatorii + tipuri)
+- query-uri parametrizate (`?`) pentru toate operatiile
+- o singura tranzactie (`COMMIT` la succes, `ROLLBACK` la eroare)
+- `ID_DOC` este folosit identic pentru toate inserarile in `MISCARI`
+- `NR_DOC` este calculat `MAX(NR_DOC)+1` pe aceeasi data pentru `TIP_DOC='BP'`
+- concurenta minima:
+  - duplicate la inserarea in `ARTICOLE` -> recitire dupa `DENUMIRE`
+  - conflict unic la miscari/nr_doc -> retry o singura data
+
+Helper-ele cerute:
+
+- `normalizeCodArticol(cod)`
+- `ensurePachetInArticole(cursor, pachet)`
+- `getNextNrDoc(cursor, data_doc)`
+
+Input exemplu:
+
+- `examples/produce_pachet_payload.example.json`
+
+Exemplu de folosire:
+
+```python
+import json
+from pathlib import Path
+
+from produce_pachet_service import (
+    FirebirdConnectionSettings,
+    get_produce_pachet_sql_queries,
+    producePachet,
+    validate_produce_pachet_input,
+)
+
+payload = json.loads(Path("examples/produce_pachet_payload.example.json").read_text(encoding="utf-8"))
+
+# optional: doar validare
+validated = validate_produce_pachet_input(payload)
+
+db_settings = FirebirdConnectionSettings(
+    database_path=r"C:\SAGA 3.0\company.fdb",
+    host="",
+    port=3050,
+    user="SYSDBA",
+    password="masterkey",
+    charset="UTF8",
+    fb_client_library_path=r"C:\Program Files\Firebird\Firebird_3_0\fbclient.dll",
+)
+
+result = producePachet(payload, db_settings)
+print(result)
+# {'success': True, 'message': 'producePachet executed successfully.', 'codPachet': '00001234', 'nrDoc': 145, 'idDoc': 3457}
+
+sql_list = get_produce_pachet_sql_queries()
+print(sql_list)
+```
+
+Rezultat JSON la succes:
+
+```json
+{
+  "success": true,
+  "message": "producePachet executed successfully.",
+  "codPachet": "00001234",
+  "nrDoc": 145,
+  "idDoc": 3457
+}
+```
