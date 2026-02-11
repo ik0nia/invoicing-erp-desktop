@@ -125,6 +125,7 @@ Exemplu mapare pentru comanda:
 - Upload token query param: `token`
 
 Aplicatia afiseaza acum in log si corpul raspunsului serverului la erori HTTP (util pentru debug).
+La upload reusit, logul afiseaza si raspunsul API (JSON/text, trunchiat daca e foarte lung).
 
 Exemplu query:
 

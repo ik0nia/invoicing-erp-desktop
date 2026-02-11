@@ -385,6 +385,27 @@ class IntegrationService:
             )
         )
 
+    @staticmethod
+    def _truncate_for_log(text: str, max_length: int = 700) -> str:
+        cleaned = text.strip()
+        if not cleaned:
+            return "<empty response body>"
+        if len(cleaned) <= max_length:
+            return cleaned
+        return f"{cleaned[:max_length]}..."
+
+    def _format_http_response_for_log(self, response: Any) -> str:
+        content_type = str(response.headers.get("Content-Type", "unknown")).strip() or "unknown"
+        try:
+            payload = response.json()
+            body_text = json.dumps(payload, ensure_ascii=True)
+        except ValueError:
+            body_text = response.text
+        return (
+            f"content-type={content_type}, "
+            f"body={self._truncate_for_log(body_text)}"
+        )
+
     def _write_csv(
         self,
         config: AppConfig,
@@ -446,19 +467,16 @@ class IntegrationService:
             try:
                 response.raise_for_status()
             except requests.HTTPError as exc:
-                body = response.text.strip()
-                if len(body) > 700:
-                    body = f"{body[:700]}..."
-                if not body:
-                    body = "<empty response body>"
                 raise RuntimeError(
-                    f"Upload failed with HTTP {response.status_code}. Server response: {body}"
+                    f"Upload failed with HTTP {response.status_code}. "
+                    f"Server response: {self._format_http_response_for_log(response)}"
                 ) from exc
 
         sanitized_url = self._sanitize_url_for_log(final_url)
         self.log(
             f"CSV uploaded successfully to {sanitized_url} (status {response.status_code}, rows {row_count})."
         )
+        self.log(f"Upload API response: {self._format_http_response_for_log(response)}")
 
     def run_export_once(self, config: AppConfig, ignore_disabled: bool = False) -> None:
         self._ensure_dependencies()
