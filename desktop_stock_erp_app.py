@@ -410,17 +410,67 @@ WHERE ID = ?
                 [id_doc_value, data_value, nr_doc_value, "BP"],
             )
             actual_bp = int(cursor.fetchone()[0] or 0)
+
+            cursor.execute(
+                """
+SELECT TRIM(RDB$FIELD_NAME)
+FROM RDB$RELATION_FIELDS
+WHERE TRIM(RDB$RELATION_NAME) = ?
+""".strip(),
+                ["PRED_DET"],
+            )
+            pred_det_columns = {str(row[0]).upper() for row in cursor.fetchall()}
+
+            actual_pred_det = 0
+            expected_pred_det = expected_bc_lines
+            pred_det_checked = False
+
+            if pred_det_columns:
+                where_parts: list[str] = []
+                params: list[Any] = []
+
+                if "ID_DOC" in pred_det_columns:
+                    where_parts.append("ID_DOC = ?")
+                    params.append(id_doc_value)
+                elif "ID" in pred_det_columns:
+                    where_parts.append("ID = ?")
+                    params.append(id_doc_value)
+
+                if "DATA" in pred_det_columns:
+                    where_parts.append("DATA = ?")
+                    params.append(data_value)
+                elif "DATA_DOC" in pred_det_columns:
+                    where_parts.append("DATA_DOC = ?")
+                    params.append(data_value)
+
+                if "NR_DOC" in pred_det_columns:
+                    where_parts.append("NR_DOC = ?")
+                    params.append(nr_doc_value)
+
+                # If at least one key field exists, verify PRED_DET rows.
+                if where_parts:
+                    pred_det_checked = True
+                    where_sql = " AND ".join(where_parts)
+                    cursor.execute(f"SELECT COUNT(*) FROM PRED_DET WHERE {where_sql}", params)
+                    actual_pred_det = int(cursor.fetchone()[0] or 0)
         finally:
             connection.close()
 
         expected_bp = 1
-        ok = actual_bc >= expected_bc_lines and actual_bp >= expected_bp
+        pred_det_ok = True
+        if pred_det_checked:
+            pred_det_ok = actual_pred_det >= expected_pred_det
+
+        ok = actual_bc >= expected_bc_lines and actual_bp >= expected_bp and pred_det_ok
         return {
             "ok": ok,
             "expected_bc": expected_bc_lines,
             "actual_bc": actual_bc,
             "expected_bp": expected_bp,
             "actual_bp": actual_bp,
+            "pred_det_checked": pred_det_checked,
+            "expected_pred_det": expected_pred_det,
+            "actual_pred_det": actual_pred_det,
         }
 
     def _resolve_status_update_id_query_param(self, config: AppConfig, update_url: str) -> str:
@@ -592,13 +642,17 @@ WHERE ID = ?
                     "Import Pachete Saga: DB verification for "
                     f"idDoc={result.get('idDoc')}, nrDoc={result.get('nrDoc')} "
                     f"(BC {verification['actual_bc']}/{verification['expected_bc']}, "
-                    f"BP {verification['actual_bp']}/{verification['expected_bp']})."
+                    f"BP {verification['actual_bp']}/{verification['expected_bp']}, "
+                    f"PRED_DET {verification['actual_pred_det']}/{verification['expected_pred_det']} "
+                    f"checked={verification['pred_det_checked']})."
                 )
                 if not bool(verification["ok"]):
                     raise RuntimeError(
                         "DB verification failed after producePachet: "
                         f"BC {verification['actual_bc']}/{verification['expected_bc']}, "
-                        f"BP {verification['actual_bp']}/{verification['expected_bp']}."
+                        f"BP {verification['actual_bp']}/{verification['expected_bp']}, "
+                        f"PRED_DET {verification['actual_pred_det']}/{verification['expected_pred_det']} "
+                        f"checked={verification['pred_det_checked']}."
                     )
 
                 status_identifier = self._resolve_status_identifier(

@@ -172,7 +172,7 @@ WHERE ACTIVE = 1
 2. Apesi **Start scheduler**
 3. Aplicatia ruleaza in bucla:
    - ia pachetele `processing` din API si executa `producePachet` in Firebird
-   - verifica imediat in DB ca exista liniile inserate in `MISCARI` (BC/BP) pentru `id_doc + data + nr_doc`
+   - verifica imediat in DB ca exista liniile inserate in `MISCARI` (BC/BP) si in `PRED_DET` pentru `id_doc + data + nr_doc`
    - pentru fiecare import reusit, apeleaza API-ul de status cu `<id_param>=valoare` si `status=imported` (daca este setat)
    - ruleaza select-ul de stoc, face CSV si upload la PHP
 4. Poti testa manual cu:
@@ -237,6 +237,7 @@ Caracteristici:
 - o singura tranzactie (`COMMIT` la succes, `ROLLBACK` la eroare)
 - `ID_DOC` este folosit identic pentru toate inserarile in `MISCARI`
 - `NR_DOC` este calculat `MAX(NR_DOC)+1` pe aceeasi data pentru `TIP_DOC='BP'`
+- insereaza consumurile/produsul finit in `MISCARI` si detalii productie in `PRED_DET` (daca tabelul exista)
 - concurenta minima:
   - duplicate la inserarea in `ARTICOLE` -> recitire dupa `DENUMIRE`
   - conflict unic la miscari/nr_doc -> retry o singura data

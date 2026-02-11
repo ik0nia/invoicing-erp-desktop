@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time as dt_time
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
@@ -56,6 +56,18 @@ SELECT COUNT(*)
 FROM RDB$RELATION_FIELDS
 WHERE TRIM(RDB$RELATION_NAME) = ?
   AND TRIM(RDB$FIELD_NAME) = ?
+""".strip(),
+    "select_relation_fields": """
+SELECT
+    TRIM(rf.RDB$FIELD_NAME) AS FIELD_NAME,
+    COALESCE(rf.RDB$NULL_FLAG, 0) AS NULL_FLAG,
+    rf.RDB$DEFAULT_SOURCE AS DEFAULT_SOURCE,
+    COALESCE(rf.RDB$IDENTITY_TYPE, -1) AS IDENTITY_TYPE,
+    COALESCE(f.RDB$FIELD_TYPE, 0) AS FIELD_TYPE
+FROM RDB$RELATION_FIELDS rf
+JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE
+WHERE TRIM(rf.RDB$RELATION_NAME) = ?
+ORDER BY rf.RDB$FIELD_POSITION
 """.strip(),
     "insert_miscari_consum_bc": """
 INSERT INTO MISCARI (
@@ -392,6 +404,161 @@ def _trim_db_char(value: str) -> str:
     return str(value or "").rstrip()
 
 
+def _build_dynamic_insert_sql(table_name: str, columns: list[str]) -> str:
+    placeholders = ", ".join(["?"] * len(columns))
+    column_list = ", ".join(columns)
+    return f"INSERT INTO {table_name} ({column_list}) VALUES ({placeholders})"
+
+
+def _get_relation_fields(cursor: Any, relation_name: str) -> list[dict[str, Any]]:
+    cursor.execute(SQL_QUERIES["select_relation_fields"], [relation_name])
+    fields: list[dict[str, Any]] = []
+    for field_name, null_flag, default_source, identity_type, field_type in cursor.fetchall():
+        fields.append(
+            {
+                "name": str(field_name),
+                "required": int(null_flag or 0) == 1 and default_source is None,
+                "identity": int(identity_type) >= 0,
+                "field_type": int(field_type or 0),
+            }
+        )
+    return fields
+
+
+def _default_value_for_field_type(field_type: int, pachet: PachetInput) -> Any | None:
+    if field_type in {7, 8, 10, 16, 23, 27}:  # numeric + boolean
+        return 0
+    if field_type == 12:  # DATE
+        return pachet.data
+    if field_type == 13:  # TIME
+        return dt_time(0, 0, 0)
+    if field_type == 35:  # TIMESTAMP
+        return datetime.combine(pachet.data, dt_time(0, 0, 0))
+    if field_type in {14, 37}:  # CHAR, VARCHAR
+        return ""
+    return None
+
+
+def _pred_det_field_value(
+    field_name: str,
+    pachet: PachetInput,
+    produs: ProdusInput,
+    cod_pachet_db: str,
+    nr_doc: int,
+    line_no: int,
+) -> Any | None:
+    upper = field_name.upper()
+    qty = abs(produs.cantitate)
+    unit_price = Decimal("0")
+    if qty != 0:
+        unit_price = (produs.val_produse / qty).quantize(_MONEY_Q, rounding=ROUND_HALF_UP)
+
+    direct_values = {
+        "ID_DOC": pachet.id_doc,
+        "IDDOC": pachet.id_doc,
+        "DOC_ID": pachet.id_doc,
+        "ID_DOCUMENT": pachet.id_doc,
+        "ID": pachet.id_doc,
+        "DATA": pachet.data,
+        "DATA_DOC": pachet.data,
+        "NR_DOC": nr_doc,
+        "TIP_DOC": "BP",
+        "TIPDOC": "BP",
+        "GESTIUNE": pachet.gestiune,
+        "GEST": pachet.gestiune,
+        "UM": "BUC",
+        "UNITATE_MASURA": "BUC",
+        "UNITATE": "BUC",
+        "CANTITATE": qty,
+        "CANT": qty,
+        "QTY": qty,
+        "VALOARE": produs.val_produse,
+        "VAL": produs.val_produse,
+        "COST": produs.val_produse,
+        "PRET": unit_price,
+        "PRET_UNITAR": unit_price,
+        "COST_UNITAR": unit_price,
+        "TVA": pachet.cota_tva,
+        "COTA_TVA": pachet.cota_tva,
+        "DENUMIRE": pachet.denumire,
+        "DEN_ART": pachet.denumire,
+        "NR_POZ": line_no,
+        "POZITIE": line_no,
+        "NR_LINIE": line_no,
+        "LINIE": line_no,
+    }
+    if upper in direct_values:
+        return direct_values[upper]
+
+    if "COD" in upper:
+        if any(key in upper for key in ("COMP", "MAT", "MATER", "MP")):
+            return produs.cod_articol_db
+        if any(key in upper for key in ("PACH", "PF", "PRODUS")):
+            return cod_pachet_db
+        if upper in {"COD_ARTICOL", "COD_ART"}:
+            return produs.cod_articol_db
+        return cod_pachet_db
+
+    return None
+
+
+def _insert_pred_det_rows(
+    cursor: Any,
+    request: ProducePachetInput,
+    cod_pachet_db: str,
+    nr_doc: int,
+) -> int:
+    fields = _get_relation_fields(cursor, "PRED_DET")
+    if not fields:
+        return 0
+
+    insertable_fields = [field for field in fields if not field["identity"]]
+    if not insertable_fields:
+        return 0
+
+    inserted_rows = 0
+    pachet = request.pachet
+
+    for line_no, produs in enumerate(request.produse, start=1):
+        columns: list[str] = []
+        values: list[Any] = []
+        missing_required: list[str] = []
+
+        for field in insertable_fields:
+            field_name = field["name"]
+            value = _pred_det_field_value(
+                field_name=field_name,
+                pachet=pachet,
+                produs=produs,
+                cod_pachet_db=cod_pachet_db,
+                nr_doc=nr_doc,
+                line_no=line_no,
+            )
+            if value is None and field["required"]:
+                value = _default_value_for_field_type(field["field_type"], pachet)
+            if value is None:
+                if field["required"]:
+                    missing_required.append(field_name)
+                continue
+
+            columns.append(field_name)
+            values.append(value)
+
+        if missing_required:
+            missing_list = ", ".join(sorted(missing_required))
+            raise RuntimeError(
+                "Cannot insert into PRED_DET. Missing required mapped columns: "
+                f"{missing_list}"
+            )
+        if not columns:
+            raise RuntimeError("Cannot insert into PRED_DET. No compatible columns were mapped.")
+
+        cursor.execute(_build_dynamic_insert_sql("PRED_DET", columns), values)
+        inserted_rows += 1
+
+    return inserted_rows
+
+
 def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> dict[str, Any]:
     pachet = request.pachet
     cod_pachet_db = ensurePachetInArticole(cursor, pachet)
@@ -442,12 +609,20 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
             ],
         )
 
+    pred_det_inserted = _insert_pred_det_rows(
+        cursor=cursor,
+        request=request,
+        cod_pachet_db=cod_pachet_db,
+        nr_doc=nr_doc,
+    )
+
     return {
         "success": True,
         "message": "producePachet executed successfully.",
         "codPachet": _trim_db_char(cod_pachet_db),
         "nrDoc": nr_doc,
         "idDoc": pachet.id_doc,
+        "predDetInserted": pred_det_inserted,
     }
 
 
