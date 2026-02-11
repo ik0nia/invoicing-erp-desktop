@@ -593,7 +593,9 @@ def _pred_det_field_value(
     upper = field_name.upper()
     sign = _operation_sign(pachet)
     qty = Decimal(sign) * abs(pachet.cantitate_produsa)
-    unit_price = Decimal(sign) * abs(pachet.pret_vanz)
+    sale_value = Decimal(sign) * abs(pachet.pret_vanz)
+    cost_total_value = Decimal(sign) * abs(pachet.cost_total)
+    unit_price = sale_value
 
     direct_values = {
         "ID_DOC": pachet.id_doc,
@@ -622,9 +624,14 @@ def _pred_det_field_value(
         "CANTITATE": qty,
         "CANT": qty,
         "QTY": qty,
-        "VALOARE": Decimal(sign) * abs(pachet.pret_vanz),
-        "VAL": Decimal(sign) * abs(pachet.pret_vanz),
-        "COST": Decimal(sign) * abs(pachet.pret_vanz),
+        "VALOARE": sale_value,
+        "VAL": sale_value,
+        "COST": cost_total_value,
+        "COST_TOTAL": cost_total_value,
+        "VAL_CONSUM": cost_total_value,
+        "VAL_CONSUMURI": cost_total_value,
+        "TOTAL_CONSUM": cost_total_value,
+        "CONSUM": cost_total_value,
         "PRET": unit_price,
         "PRET_VANZ": unit_price,
         "PRET_UNITAR": unit_price,
@@ -649,6 +656,9 @@ def _pred_det_field_value(
         if upper in {"COD_ARTICOL", "COD_ART"}:
             return cod_pachet_db
         return cod_pachet_db
+
+    if "CONSUM" in upper or upper.endswith("_COST") or upper.startswith("COST_"):
+        return cost_total_value
 
     return None
 
