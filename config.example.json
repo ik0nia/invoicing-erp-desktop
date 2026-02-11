@@ -9,6 +9,7 @@
   "enable_sync_job": true,
   "sync_interval_seconds": 120,
   "sync_api_url": "https://api.example.com/firebird-sync-commands",
+  "pachet_import_api_url": "https://api.example.com/pachete/pending",
   "sync_api_token": "",
   "enable_export_job": true,
   "export_interval_seconds": 300,

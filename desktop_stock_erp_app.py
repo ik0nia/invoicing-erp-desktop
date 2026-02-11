@@ -36,6 +36,15 @@ except Exception as exc:  # pragma: no cover - import guard
 else:
     FIREBIRD_IMPORT_ERROR = None
 
+try:
+    from produce_pachet_service import FirebirdConnectionSettings, producePachet
+except Exception as exc:  # pragma: no cover - import guard
+    FirebirdConnectionSettings = None
+    producePachet = None
+    PRODUCE_PACHET_IMPORT_ERROR = exc
+else:
+    PRODUCE_PACHET_IMPORT_ERROR = None
+
 CONFIG_PATH = Path("config.json")
 
 
@@ -75,6 +84,7 @@ class AppConfig:
     enable_sync_job: bool = True
     sync_interval_seconds: int = 120
     sync_api_url: str = ""
+    pachet_import_api_url: str = ""
     sync_api_token: str = ""
     enable_export_job: bool = True
     export_interval_seconds: int = 300
@@ -108,6 +118,7 @@ class AppConfig:
                 minimum=5,
             ),
             sync_api_url=str(data.get("sync_api_url", "")),
+            pachet_import_api_url=str(data.get("pachet_import_api_url", "")),
             sync_api_token=str(data.get("sync_api_token", "")),
             enable_export_job=to_bool(data.get("enable_export_job"), default=True),
             export_interval_seconds=to_int(
@@ -266,14 +277,30 @@ class IntegrationService:
     def _fetch_sync_commands(self, config: AppConfig) -> list[dict[str, Any]]:
         url = config.sync_api_url.strip()
         if not url:
-            raise ValueError("Sync API URL is empty.")
+            return []
+        payload = self._fetch_json_from_api(
+            url=url,
+            token=config.sync_api_token.strip(),
+            config=config,
+            job_name="SQL sync",
+        )
+        commands = self._parse_commands(payload)
+        self.log(f"SQL sync API returned {len(commands)} command(s).")
+        return commands
 
+    def _fetch_json_from_api(
+        self,
+        *,
+        url: str,
+        token: str,
+        config: AppConfig,
+        job_name: str,
+    ) -> Any:
         headers = {"Accept": "application/json"}
-        token = config.sync_api_token.strip()
         if token:
             headers["Authorization"] = f"Bearer {token}"
 
-        self.log(f"Fetching SQL commands from API: {self._sanitize_url_for_log(url)}")
+        self.log(f"Fetching {job_name} payload from API: {self._sanitize_url_for_log(url)}")
         response = requests.get(
             url,
             headers=headers,
@@ -281,21 +308,11 @@ class IntegrationService:
             verify=config.verify_ssl,
         )
         response.raise_for_status()
-        payload = response.json()
-        commands = self._parse_commands(payload)
-        self.log(f"API returned {len(commands)} command(s).")
-        return commands
+        return response.json()
 
-    def run_sync_once(self, config: AppConfig, ignore_disabled: bool = False) -> None:
-        self._ensure_dependencies()
-        if not ignore_disabled and not config.enable_sync_job:
-            self.log("Sync job is disabled. Skipping execution.")
-            return
-
-        commands = self._fetch_sync_commands(config)
+    def _execute_sql_commands(self, config: AppConfig, commands: list[dict[str, Any]]) -> int:
         if not commands:
-            self.log("No SQL commands to execute.")
-            return
+            return 0
 
         connection = self._connect(config)
         try:
@@ -310,13 +327,136 @@ class IntegrationService:
                     cursor.execute(sql, params)
                 executed += 1
             connection.commit()
+            return executed
         except Exception:
             connection.rollback()
             raise
         finally:
             connection.close()
 
-        self.log(f"Sync job completed. Executed {executed} command(s).")
+    @staticmethod
+    def _extract_pachet_requests(payload: Any) -> list[dict[str, Any]]:
+        if isinstance(payload, dict) and isinstance(payload.get("pachet"), dict) and isinstance(payload.get("produse"), list):
+            source = [payload]
+        elif isinstance(payload, list):
+            source = payload
+        elif isinstance(payload, dict):
+            source = []
+            for key in ("pachete", "items", "data", "results"):
+                candidate = payload.get(key)
+                if isinstance(candidate, list):
+                    source = candidate
+                    break
+        else:
+            source = []
+
+        requests_payloads: list[dict[str, Any]] = []
+        for item in source:
+            if not isinstance(item, dict):
+                continue
+            pachet = item.get("pachet")
+            produse = item.get("produse")
+            if not isinstance(pachet, dict) or not isinstance(produse, list):
+                continue
+            status = str(pachet.get("status", "")).strip().lower()
+            if status and status != "pending":
+                continue
+            requests_payloads.append(item)
+        return requests_payloads
+
+    @staticmethod
+    def _build_produce_pachet_db_settings(config: AppConfig):
+        if FirebirdConnectionSettings is None:
+            raise RuntimeError(
+                "produce_pachet_service import failed: "
+                f"{PRODUCE_PACHET_IMPORT_ERROR}"
+            )
+        return FirebirdConnectionSettings(
+            database_path=config.db_path.strip(),
+            host=config.db_host.strip(),
+            port=config.db_port,
+            user=config.db_user.strip(),
+            password=config.db_password,
+            charset=config.db_charset.strip() or "UTF8",
+            fb_client_library_path=config.fb_client_library_path.strip(),
+        )
+
+    def _run_pachet_import_sync(self, config: AppConfig) -> int:
+        url = config.pachet_import_api_url.strip()
+        if not url:
+            return 0
+        if producePachet is None:
+            raise RuntimeError(
+                f"produce_pachet_service import failed: {PRODUCE_PACHET_IMPORT_ERROR}"
+            )
+
+        payload = self._fetch_json_from_api(
+            url=url,
+            token=config.sync_api_token.strip(),
+            config=config,
+            job_name="pachet import",
+        )
+        items = self._extract_pachet_requests(payload)
+        self.log(f"Pachet import API returned {len(items)} pending request(s).")
+        if not items:
+            return 0
+
+        db_settings = self._build_produce_pachet_db_settings(config)
+        success_count = 0
+        error_messages: list[str] = []
+
+        for index, item in enumerate(items, start=1):
+            try:
+                result = producePachet(item, db_settings)
+                success_count += 1
+                self.log(
+                    "producePachet success "
+                    f"#{index}: codPachet={result.get('codPachet')}, "
+                    f"nrDoc={result.get('nrDoc')}, idDoc={result.get('idDoc')}"
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                message = f"producePachet failed #{index}: {exc}"
+                error_messages.append(message)
+                self.log(message)
+
+        if error_messages:
+            raise RuntimeError(
+                "Pachet import finished with errors. "
+                f"success={success_count}, failed={len(error_messages)}"
+            )
+        return success_count
+
+    def run_sync_once(self, config: AppConfig, ignore_disabled: bool = False) -> None:
+        self._ensure_dependencies()
+        if not ignore_disabled and not config.enable_sync_job:
+            self.log("Sync job is disabled. Skipping execution.")
+            return
+
+        sync_url = config.sync_api_url.strip()
+        pachet_url = config.pachet_import_api_url.strip()
+        if not sync_url and not pachet_url:
+            self.log("No sync API configured. Set SQL Sync API URL and/or Pachet import API URL.")
+            return
+
+        sql_executed = 0
+        pachete_processed = 0
+
+        if sync_url:
+            commands = self._fetch_sync_commands(config)
+            if commands:
+                sql_executed = self._execute_sql_commands(config, commands)
+                self.log(f"SQL sync completed. Executed {sql_executed} command(s).")
+            else:
+                self.log("SQL sync returned no commands.")
+
+        if pachet_url:
+            pachete_processed = self._run_pachet_import_sync(config)
+            self.log(f"Pachet import completed. Processed {pachete_processed} item(s).")
+
+        self.log(
+            "Sync job completed. "
+            f"sql_commands={sql_executed}, pachete_processed={pachete_processed}."
+        )
 
     def _query_stock(self, config: AppConfig) -> tuple[list[str], list[tuple[Any, ...]]]:
         sql = config.stock_select_sql.strip()
@@ -733,6 +873,7 @@ class DesktopApp(tk.Tk):
 
         self.var_sync_enabled = tk.BooleanVar()
         self.var_sync_api_url = tk.StringVar()
+        self.var_pachet_import_api_url = tk.StringVar()
         self.var_sync_api_token = tk.StringVar()
         self.var_sync_interval = tk.StringVar()
 
@@ -876,17 +1017,21 @@ class DesktopApp(tk.Tk):
             sticky="w",
             pady=(0, 10),
         )
-        self._add_entry_row(frame, 1, "Sync API URL", self.var_sync_api_url)
-        self._add_entry_row(frame, 2, "API token (optional)", self.var_sync_api_token)
-        self._add_entry_row(frame, 3, "Sync interval (seconds)", self.var_sync_interval)
+        self._add_entry_row(frame, 1, "SQL Sync API URL (optional)", self.var_sync_api_url)
+        self._add_entry_row(frame, 2, "Pachet import API URL (optional)", self.var_pachet_import_api_url)
+        self._add_entry_row(frame, 3, "API token (optional)", self.var_sync_api_token)
+        self._add_entry_row(frame, 4, "Sync interval (seconds)", self.var_sync_interval)
 
         payload_help = (
-            "Expected API payload:\n"
+            "SQL sync payload:\n"
             "[{\"sql\":\"INSERT INTO TBL(ID, SKU, QTY) VALUES (?, ?, ?)\",\"params\":[1,\"A1\",10]}]\n"
-            "or {\"commands\":[...]}."
+            "or {\"commands\":[...]}\n\n"
+            "Pachet import payload:\n"
+            "{\"pachet\": {..., \"status\":\"pending\"}, \"produse\": [...]} "
+            "or {\"pachete\": [ ... ]}."
         )
         ttk.Label(frame, text=payload_help, wraplength=780, foreground="#4B5563").grid(
-            row=4,
+            row=5,
             column=0,
             columnspan=2,
             sticky="w",
@@ -995,6 +1140,7 @@ class DesktopApp(tk.Tk):
 
         self.var_sync_enabled.set(config.enable_sync_job)
         self.var_sync_api_url.set(config.sync_api_url)
+        self.var_pachet_import_api_url.set(config.pachet_import_api_url)
         self.var_sync_api_token.set(config.sync_api_token)
         self.var_sync_interval.set(str(config.sync_interval_seconds))
 
@@ -1035,6 +1181,7 @@ class DesktopApp(tk.Tk):
             enable_sync_job=self.var_sync_enabled.get(),
             sync_interval_seconds=sync_interval,
             sync_api_url=self.var_sync_api_url.get().strip(),
+            pachet_import_api_url=self.var_pachet_import_api_url.get().strip(),
             sync_api_token=self.var_sync_api_token.get().strip(),
             enable_export_job=self.var_export_enabled.get(),
             export_interval_seconds=export_interval,
@@ -1070,8 +1217,15 @@ class DesktopApp(tk.Tk):
     def _validate_config(self, config: AppConfig) -> None:
         if not config.db_path:
             raise ValueError("Please select a Firebird database file.")
-        if config.enable_sync_job and not config.sync_api_url:
-            raise ValueError("Sync API URL is required when sync job is enabled.")
+        if (
+            config.enable_sync_job
+            and not config.sync_api_url.strip()
+            and not config.pachet_import_api_url.strip()
+        ):
+            raise ValueError(
+                "At least one sync endpoint is required when sync job is enabled: "
+                "SQL Sync API URL or Pachet import API URL."
+            )
         if config.enable_export_job and not config.stock_select_sql:
             raise ValueError("Stock SELECT SQL is required when export job is enabled.")
         if config.enable_export_job and not config.upload_url:

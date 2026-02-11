@@ -64,11 +64,12 @@ python desktop_stock_erp_app.py
 ### 2) Tab API sync
 
 - **Enable periodic sync job**: activeaza jobul de insert periodic
-- **Sync API URL**: endpoint care returneaza comenzile SQL
+- **SQL Sync API URL (optional)**: endpoint care returneaza comenzi SQL parametrizate
+- **Pachet import API URL (optional)**: endpoint de unde aplicatia citeste pachetele de importat (`producePachet`)
 - **API token**: optional (Bearer token)
 - **Sync interval (seconds)**: la cat timp sa ruleze
 
-Payload-ul API suportat:
+Payload SQL suportat:
 
 ```json
 [
@@ -88,6 +89,37 @@ Sau:
       "sql": "INSERT INTO STOCK_UPDATES(ID, SKU, QTY) VALUES (?, ?, ?)",
       "params": [1, "ABC-01", 15]
     }
+  ]
+}
+```
+
+Payload pachet suportat:
+
+```json
+{
+  "pachet": {
+    "id_doc": 3457,
+    "data": "2026-02-10",
+    "denumire": "PACHET #1010",
+    "pret_vanz": 500.0,
+    "cota_tva": 21.0,
+    "cost_total": 120.0,
+    "gestiune": "0001",
+    "cantitate_produsa": 1.0,
+    "status": "pending"
+  },
+  "produse": [
+    { "cod_articol": "00000402", "cantitate": 3.0, "val_produse": 60.0 }
+  ]
+}
+```
+
+Sau lista:
+
+```json
+{
+  "pachete": [
+    { "pachet": { "...": "..." }, "produse": [ { "...": "..." } ] }
   ]
 }
 ```
