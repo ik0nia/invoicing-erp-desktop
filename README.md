@@ -61,39 +61,14 @@ python desktop_stock_erp_app.py
 - **Charset**: ex. `UTF8`
 - **Firebird client library (fbclient.dll)**: optional, dar recomandat daca aplicatia nu gaseste automat clientul Firebird
 
-### 2) Tab API sync
+### 2) Tab Import Pachete Saga
 
-- **Enable periodic sync job**: activeaza jobul de insert periodic
-- **SQL Sync API URL (optional)**: endpoint care returneaza comenzi SQL parametrizate
-- **Pachet import API URL (optional)**: endpoint de unde aplicatia citeste pachetele de importat (`producePachet`)
-- **API token**: optional (Bearer token)
-- **Sync interval (seconds)**: la cat timp sa ruleze
+- **Enable Import Pachete Saga job**: activeaza jobul de import periodic
+- **Import API URL**: endpoint de unde aplicatia citeste pachetele de importat (`producePachet`)
+- **Import API token**: optional (Bearer token)
+- **Import interval (seconds)**: la cat timp sa ruleze
 
-Payload SQL suportat:
-
-```json
-[
-  {
-    "sql": "INSERT INTO STOCK_UPDATES(ID, SKU, QTY) VALUES (?, ?, ?)",
-    "params": [1, "ABC-01", 15]
-  }
-]
-```
-
-Sau:
-
-```json
-{
-  "commands": [
-    {
-      "sql": "INSERT INTO STOCK_UPDATES(ID, SKU, QTY) VALUES (?, ?, ?)",
-      "params": [1, "ABC-01", 15]
-    }
-  ]
-}
-```
-
-Payload pachet suportat:
+Payload suportat:
 
 ```json
 {
@@ -130,7 +105,7 @@ Sau lista:
 - **Export interval (seconds)**: la cat timp ruleaza query-ul de stoc
 - **Upload URL**: endpoint PHP care primeste CSV
 - **Upload file field name**: implicit `file`
-- **Upload API token**: token separat pentru upload (optional; daca e gol se foloseste token-ul din API sync)
+- **Upload API token**: token separat pentru upload (optional; daca e gol se foloseste token-ul din Import Pachete Saga)
 - **Upload token query param**: daca API vrea token in query string, ex. `token`
 - **Upload headers JSON**: headere custom pentru upload (ex: `{"X-App-Key":"abc"}`)
 - **Upload User-Agent**: util cand serverul blocheaza `python-requests/*`
@@ -177,10 +152,10 @@ WHERE ACTIVE = 1
 1. Apesi **Save config**
 2. Apesi **Start scheduler**
 3. Aplicatia ruleaza in bucla:
-   - ia insert-uri din API si le executa in Firebird
+   - ia pachetele `pending` din API si executa `producePachet` in Firebird
    - ruleaza select-ul de stoc, face CSV si upload la PHP
 4. Poti testa manual cu:
-   - **Run sync now**
+   - **Run import now**
    - **Run export now**
 
 Toate actiunile apar in tab-ul **Logs**.

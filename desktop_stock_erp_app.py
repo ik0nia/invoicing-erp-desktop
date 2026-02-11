@@ -83,7 +83,6 @@ class AppConfig:
     fb_client_library_path: str = ""
     enable_sync_job: bool = True
     sync_interval_seconds: int = 120
-    sync_api_url: str = ""
     pachet_import_api_url: str = ""
     sync_api_token: str = ""
     enable_export_job: bool = True
@@ -117,7 +116,6 @@ class AppConfig:
                 default=120,
                 minimum=5,
             ),
-            sync_api_url=str(data.get("sync_api_url", "")),
             pachet_import_api_url=str(data.get("pachet_import_api_url", "")),
             sync_api_token=str(data.get("sync_api_token", "")),
             enable_export_job=to_bool(data.get("enable_export_job"), default=True),
@@ -243,51 +241,6 @@ class IntegrationService:
                 ) from exc
             raise
 
-    @staticmethod
-    def _parse_commands(payload: Any) -> list[dict[str, Any]]:
-        if isinstance(payload, list):
-            source = payload
-        elif isinstance(payload, dict):
-            for key in ("commands", "inserts", "data"):
-                candidate = payload.get(key)
-                if isinstance(candidate, list):
-                    source = candidate
-                    break
-            else:
-                source = []
-        else:
-            source = []
-
-        normalized: list[dict[str, Any]] = []
-        for item in source:
-            if isinstance(item, str):
-                sql = item.strip()
-                if sql:
-                    normalized.append({"sql": sql, "params": []})
-                continue
-            if not isinstance(item, dict):
-                continue
-            sql = str(item.get("sql", "")).strip()
-            if not sql:
-                continue
-            params = item.get("params")
-            normalized.append({"sql": sql, "params": params})
-        return normalized
-
-    def _fetch_sync_commands(self, config: AppConfig) -> list[dict[str, Any]]:
-        url = config.sync_api_url.strip()
-        if not url:
-            return []
-        payload = self._fetch_json_from_api(
-            url=url,
-            token=config.sync_api_token.strip(),
-            config=config,
-            job_name="SQL sync",
-        )
-        commands = self._parse_commands(payload)
-        self.log(f"SQL sync API returned {len(commands)} command(s).")
-        return commands
-
     def _fetch_json_from_api(
         self,
         *,
@@ -309,30 +262,6 @@ class IntegrationService:
         )
         response.raise_for_status()
         return response.json()
-
-    def _execute_sql_commands(self, config: AppConfig, commands: list[dict[str, Any]]) -> int:
-        if not commands:
-            return 0
-
-        connection = self._connect(config)
-        try:
-            cursor = connection.cursor()
-            executed = 0
-            for command in commands:
-                sql = command["sql"]
-                params = command.get("params")
-                if params is None:
-                    cursor.execute(sql)
-                else:
-                    cursor.execute(sql, params)
-                executed += 1
-            connection.commit()
-            return executed
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
 
     @staticmethod
     def _extract_pachet_requests(payload: Any) -> list[dict[str, Any]]:
@@ -390,15 +319,17 @@ class IntegrationService:
                 f"produce_pachet_service import failed: {PRODUCE_PACHET_IMPORT_ERROR}"
             )
 
+        self.log("Import Pachete Saga: starting fetch from API.")
         payload = self._fetch_json_from_api(
             url=url,
             token=config.sync_api_token.strip(),
             config=config,
-            job_name="pachet import",
+            job_name="Import Pachete Saga",
         )
         items = self._extract_pachet_requests(payload)
-        self.log(f"Pachet import API returned {len(items)} pending request(s).")
+        self.log(f"Import Pachete Saga: API returned {len(items)} pending request(s).")
         if not items:
+            self.log("Import Pachete Saga: no pending items to process.")
             return 0
 
         db_settings = self._build_produce_pachet_db_settings(config)
@@ -406,22 +337,33 @@ class IntegrationService:
         error_messages: list[str] = []
 
         for index, item in enumerate(items, start=1):
+            pachet_data = item.get("pachet") if isinstance(item, dict) else {}
+            id_doc = str((pachet_data or {}).get("id_doc", "")).strip() or "?"
+            denumire = str((pachet_data or {}).get("denumire", "")).strip() or "?"
+            self.log(
+                "Import Pachete Saga: processing "
+                f"#{index}/{len(items)} (id_doc={id_doc}, denumire={denumire})"
+            )
             try:
                 result = producePachet(item, db_settings)
                 success_count += 1
                 self.log(
-                    "producePachet success "
+                    "Import Pachete Saga: success "
                     f"#{index}: codPachet={result.get('codPachet')}, "
                     f"nrDoc={result.get('nrDoc')}, idDoc={result.get('idDoc')}"
                 )
             except Exception as exc:  # pylint: disable=broad-except
-                message = f"producePachet failed #{index}: {exc}"
+                message = f"Import Pachete Saga: failed #{index}: {exc}"
                 error_messages.append(message)
                 self.log(message)
 
+        self.log(
+            "Import Pachete Saga: finished. "
+            f"success={success_count}, failed={len(error_messages)}."
+        )
         if error_messages:
             raise RuntimeError(
-                "Pachet import finished with errors. "
+                "Import Pachete Saga finished with errors. "
                 f"success={success_count}, failed={len(error_messages)}"
             )
         return success_count
@@ -429,33 +371,20 @@ class IntegrationService:
     def run_sync_once(self, config: AppConfig, ignore_disabled: bool = False) -> None:
         self._ensure_dependencies()
         if not ignore_disabled and not config.enable_sync_job:
-            self.log("Sync job is disabled. Skipping execution.")
+            self.log("Import Pachete Saga job is disabled. Skipping execution.")
             return
 
-        sync_url = config.sync_api_url.strip()
         pachet_url = config.pachet_import_api_url.strip()
-        if not sync_url and not pachet_url:
-            self.log("No sync API configured. Set SQL Sync API URL and/or Pachet import API URL.")
+        if not pachet_url:
+            self.log("Import Pachete Saga API URL is empty. Set it in Import Pachete Saga tab.")
             return
 
-        sql_executed = 0
-        pachete_processed = 0
-
-        if sync_url:
-            commands = self._fetch_sync_commands(config)
-            if commands:
-                sql_executed = self._execute_sql_commands(config, commands)
-                self.log(f"SQL sync completed. Executed {sql_executed} command(s).")
-            else:
-                self.log("SQL sync returned no commands.")
-
-        if pachet_url:
-            pachete_processed = self._run_pachet_import_sync(config)
-            self.log(f"Pachet import completed. Processed {pachete_processed} item(s).")
-
+        self.log("Import Pachete Saga job started.")
+        pachete_processed = self._run_pachet_import_sync(config)
+        self.log(f"Import Pachete Saga completed. Processed {pachete_processed} item(s).")
         self.log(
-            "Sync job completed. "
-            f"sql_commands={sql_executed}, pachete_processed={pachete_processed}."
+            "Import Pachete Saga summary: "
+            f"processed={pachete_processed}."
         )
 
     def _query_stock(self, config: AppConfig) -> tuple[list[str], list[tuple[Any, ...]]]:
@@ -827,7 +756,7 @@ class SchedulerEngine:
             config = self._config
 
             if config.enable_sync_job and now >= next_sync:
-                self._run_job("sync", self.service.run_sync_once)
+                self._run_job("Import Pachete Saga", self.service.run_sync_once)
                 next_sync = now + max(5, config.sync_interval_seconds)
 
             if config.enable_export_job and now >= next_export:
@@ -872,7 +801,6 @@ class DesktopApp(tk.Tk):
         self.var_fb_client_library = tk.StringVar()
 
         self.var_sync_enabled = tk.BooleanVar()
-        self.var_sync_api_url = tk.StringVar()
         self.var_pachet_import_api_url = tk.StringVar()
         self.var_sync_api_token = tk.StringVar()
         self.var_sync_interval = tk.StringVar()
@@ -908,7 +836,11 @@ class DesktopApp(tk.Tk):
         self.btn_stop = ttk.Button(button_row, text="Stop scheduler", command=self._on_stop)
         self.btn_stop.pack(side="left", padx=(0, 8))
 
-        self.btn_run_sync = ttk.Button(button_row, text="Run sync now", command=self._run_sync_now)
+        self.btn_run_sync = ttk.Button(
+            button_row,
+            text="Run import now",
+            command=self._run_sync_now,
+        )
         self.btn_run_sync.pack(side="left", padx=(0, 8))
 
         self.btn_run_export = ttk.Button(
@@ -928,7 +860,7 @@ class DesktopApp(tk.Tk):
         logs_frame = ttk.Frame(notebook, padding=12)
 
         notebook.add(firebird_frame, text="Firebird")
-        notebook.add(sync_frame, text="API sync")
+        notebook.add(sync_frame, text="Import Pachete Saga")
         notebook.add(export_frame, text="Stock export")
         notebook.add(logs_frame, text="Logs")
 
@@ -1010,28 +942,24 @@ class DesktopApp(tk.Tk):
     def _build_sync_tab(self, frame: ttk.Frame) -> None:
         frame.columnconfigure(1, weight=1)
 
-        ttk.Checkbutton(frame, text="Enable periodic sync job", variable=self.var_sync_enabled).grid(
+        ttk.Checkbutton(frame, text="Enable Import Pachete Saga job", variable=self.var_sync_enabled).grid(
             row=0,
             column=0,
             columnspan=2,
             sticky="w",
             pady=(0, 10),
         )
-        self._add_entry_row(frame, 1, "SQL Sync API URL (optional)", self.var_sync_api_url)
-        self._add_entry_row(frame, 2, "Pachet import API URL (optional)", self.var_pachet_import_api_url)
-        self._add_entry_row(frame, 3, "API token (optional)", self.var_sync_api_token)
-        self._add_entry_row(frame, 4, "Sync interval (seconds)", self.var_sync_interval)
+        self._add_entry_row(frame, 1, "Import API URL", self.var_pachet_import_api_url)
+        self._add_entry_row(frame, 2, "Import API token (optional)", self.var_sync_api_token)
+        self._add_entry_row(frame, 3, "Import interval (seconds)", self.var_sync_interval)
 
         payload_help = (
-            "SQL sync payload:\n"
-            "[{\"sql\":\"INSERT INTO TBL(ID, SKU, QTY) VALUES (?, ?, ?)\",\"params\":[1,\"A1\",10]}]\n"
-            "or {\"commands\":[...]}\n\n"
-            "Pachet import payload:\n"
+            "Expected payload:\n"
             "{\"pachet\": {..., \"status\":\"pending\"}, \"produse\": [...]} "
             "or {\"pachete\": [ ... ]}."
         )
         ttk.Label(frame, text=payload_help, wraplength=780, foreground="#4B5563").grid(
-            row=5,
+            row=4,
             column=0,
             columnspan=2,
             sticky="w",
@@ -1139,7 +1067,6 @@ class DesktopApp(tk.Tk):
         self.var_fb_client_library.set(config.fb_client_library_path)
 
         self.var_sync_enabled.set(config.enable_sync_job)
-        self.var_sync_api_url.set(config.sync_api_url)
         self.var_pachet_import_api_url.set(config.pachet_import_api_url)
         self.var_sync_api_token.set(config.sync_api_token)
         self.var_sync_interval.set(str(config.sync_interval_seconds))
@@ -1180,7 +1107,6 @@ class DesktopApp(tk.Tk):
             fb_client_library_path=self.var_fb_client_library.get().strip(),
             enable_sync_job=self.var_sync_enabled.get(),
             sync_interval_seconds=sync_interval,
-            sync_api_url=self.var_sync_api_url.get().strip(),
             pachet_import_api_url=self.var_pachet_import_api_url.get().strip(),
             sync_api_token=self.var_sync_api_token.get().strip(),
             enable_export_job=self.var_export_enabled.get(),
@@ -1217,15 +1143,8 @@ class DesktopApp(tk.Tk):
     def _validate_config(self, config: AppConfig) -> None:
         if not config.db_path:
             raise ValueError("Please select a Firebird database file.")
-        if (
-            config.enable_sync_job
-            and not config.sync_api_url.strip()
-            and not config.pachet_import_api_url.strip()
-        ):
-            raise ValueError(
-                "At least one sync endpoint is required when sync job is enabled: "
-                "SQL Sync API URL or Pachet import API URL."
-            )
+        if config.enable_sync_job and not config.pachet_import_api_url.strip():
+            raise ValueError("Import API URL is required when Import Pachete Saga job is enabled.")
         if config.enable_export_job and not config.stock_select_sql:
             raise ValueError("Stock SELECT SQL is required when export job is enabled.")
         if config.enable_export_job and not config.upload_url:
@@ -1257,7 +1176,7 @@ class DesktopApp(tk.Tk):
         self._set_button_states()
 
     def _run_sync_now(self) -> None:
-        self._run_manual_job("sync")
+        self._run_manual_job("import_pachete")
 
     def _run_export_now(self) -> None:
         self._run_manual_job("export")
@@ -1271,16 +1190,21 @@ class DesktopApp(tk.Tk):
             messagebox.showerror("Cannot run job", str(exc))
             return
 
+        job_display_name = {
+            "import_pachete": "Import Pachete Saga",
+            "export": "Export stocuri",
+        }.get(name, name)
+
         def _runner() -> None:
-            self._enqueue_log(f"Manual {name} job started.")
+            self._enqueue_log(f"Manual {job_display_name} job started.")
             try:
-                if name == "sync":
+                if name == "import_pachete":
                     self.service.run_sync_once(config, ignore_disabled=True)
                 else:
                     self.service.run_export_once(config, ignore_disabled=True)
-                self._enqueue_log(f"Manual {name} job finished.")
+                self._enqueue_log(f"Manual {job_display_name} job finished.")
             except Exception as inner_exc:  # pylint: disable=broad-except
-                self._enqueue_log(f"Manual {name} job failed: {inner_exc}")
+                self._enqueue_log(f"Manual {job_display_name} job failed: {inner_exc}")
 
         thread = threading.Thread(target=_runner, daemon=True)
         thread.start()
