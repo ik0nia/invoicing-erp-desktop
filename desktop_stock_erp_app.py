@@ -86,6 +86,7 @@ class AppConfig:
     pachet_import_api_url: str = ""
     sync_api_token: str = ""
     pachet_status_update_api_url: str = ""
+    pachet_status_update_id_query_param: str = ""
     pachet_import_token_query_param: str = ""
     pachet_import_headers_json: str = ""
     pachet_import_user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0"
@@ -123,6 +124,7 @@ class AppConfig:
             pachet_import_api_url=str(data.get("pachet_import_api_url", "")),
             sync_api_token=str(data.get("sync_api_token", "")),
             pachet_status_update_api_url=str(data.get("pachet_status_update_api_url", "")),
+            pachet_status_update_id_query_param=str(data.get("pachet_status_update_id_query_param", "")),
             pachet_import_token_query_param=str(data.get("pachet_import_token_query_param", "")),
             pachet_import_headers_json=str(data.get("pachet_import_headers_json", "")),
             pachet_import_user_agent=str(
@@ -349,11 +351,48 @@ class IntegrationService:
             fb_client_library_path=config.fb_client_library_path.strip(),
         )
 
+    def _resolve_status_update_id_query_param(self, config: AppConfig, update_url: str) -> str:
+        configured = config.pachet_status_update_id_query_param.strip()
+        if configured:
+            return configured
+
+        token_query_param = config.pachet_import_token_query_param.strip().lower()
+        parts = urlsplit(update_url)
+        for key, _ in parse_qsl(parts.query, keep_blank_values=True):
+            lowered = key.strip().lower()
+            if not lowered:
+                continue
+            if lowered in {"status", "token", "access_token", "api_key", "apikey", "key", "password"}:
+                continue
+            if token_query_param and lowered == token_query_param:
+                continue
+            return key.strip()
+
+        return "id_pachet"
+
+    @staticmethod
+    def _resolve_status_identifier(
+        pachet_data: dict[str, Any] | None,
+        produce_result: dict[str, Any] | None,
+    ) -> str:
+        payload = pachet_data or {}
+        result = produce_result or {}
+        for key in ("id_pachet", "id_doc", "nr_doc"):
+            value = payload.get(key)
+            if value not in (None, ""):
+                return str(value).strip()
+        for key in ("idDoc", "nrDoc"):
+            value = result.get(key)
+            if value not in (None, ""):
+                return str(value).strip()
+        return ""
+
     def _call_pachet_status_update_api(
         self,
         config: AppConfig,
         *,
-        nr_doc: Any,
+        status_identifier: Any,
+        id_param_name: str,
         id_doc: Any,
         cod_pachet: Any,
     ) -> None:
@@ -361,9 +400,14 @@ class IntegrationService:
         if not update_url:
             return
 
-        nr_doc_value = str(nr_doc).strip()
-        if not nr_doc_value:
-            raise RuntimeError("Cannot update pachet status: missing nr_doc value.")
+        id_value = str(status_identifier).strip()
+        if not id_value:
+            raise RuntimeError(
+                "Cannot update pachet status: missing identifier value "
+                f"for query parameter '{id_param_name}'."
+            )
+        if not id_param_name.strip():
+            raise RuntimeError("Cannot update pachet status: missing identifier query parameter name.")
 
         token = config.sync_api_token.strip()
         query_param = config.pachet_import_token_query_param.strip()
@@ -375,7 +419,7 @@ class IntegrationService:
             headers["User-Agent"] = user_agent
         headers.update(self._parse_extra_fields(headers_json))
 
-        final_url = self._with_query_param(update_url, "nr_doc", nr_doc_value)
+        final_url = self._with_query_param(update_url, id_param_name, id_value)
         final_url = self._with_query_param(final_url, "status", "imported")
         if token and query_param:
             final_url = self._with_query_param(final_url, query_param, token)
@@ -384,7 +428,7 @@ class IntegrationService:
 
         self.log(
             "Import Pachete Saga: calling status update API "
-            f"for nr_doc={nr_doc_value} at {self._sanitize_url_for_log(final_url)}"
+            f"for {id_param_name}={id_value} at {self._sanitize_url_for_log(final_url)}"
         )
         response = requests.get(
             final_url,
@@ -402,7 +446,7 @@ class IntegrationService:
 
         self.log(
             "Import Pachete Saga: status updated to imported "
-            f"(nr_doc={nr_doc_value}, id_doc={id_doc}, cod_pachet={cod_pachet})."
+            f"({id_param_name}={id_value}, id_doc={id_doc}, cod_pachet={cod_pachet})."
         )
         self.log(
             "Import Pachete Saga: status update API response: "
@@ -441,11 +485,13 @@ class IntegrationService:
         success_count = 0
         error_messages: list[str] = []
         update_url = config.pachet_status_update_api_url.strip()
+        id_param_name = self._resolve_status_update_id_query_param(config, update_url) if update_url else ""
         if update_url:
             self.log(
                 "Import Pachete Saga: status update API is enabled at "
                 f"{self._sanitize_url_for_log(update_url)}."
             )
+            self.log(f"Import Pachete Saga: status update id param is '{id_param_name}'.")
         else:
             self.log(
                 "Import Pachete Saga: status update API URL is not set; "
@@ -462,15 +508,15 @@ class IntegrationService:
             )
             try:
                 result = producePachet(item, db_settings)
-                nr_doc_for_status = (pachet_data or {}).get("nr_doc")
-                if nr_doc_for_status in (None, ""):
-                    nr_doc_for_status = result.get("nrDoc")
-                if nr_doc_for_status in (None, ""):
-                    nr_doc_for_status = (pachet_data or {}).get("id_doc")
+                status_identifier = self._resolve_status_identifier(
+                    pachet_data=pachet_data if isinstance(pachet_data, dict) else {},
+                    produce_result=result if isinstance(result, dict) else {},
+                )
 
                 self._call_pachet_status_update_api(
                     config,
-                    nr_doc=nr_doc_for_status,
+                    status_identifier=status_identifier,
+                    id_param_name=id_param_name,
                     id_doc=result.get("idDoc"),
                     cod_pachet=result.get("codPachet"),
                 )
@@ -932,6 +978,7 @@ class DesktopApp(tk.Tk):
         self.var_pachet_import_api_url = tk.StringVar()
         self.var_sync_api_token = tk.StringVar()
         self.var_pachet_status_update_api_url = tk.StringVar()
+        self.var_pachet_status_update_id_query_param = tk.StringVar()
         self.var_pachet_import_token_query_param = tk.StringVar()
         self.var_pachet_import_headers_json = tk.StringVar()
         self.var_pachet_import_user_agent = tk.StringVar()
@@ -1102,7 +1149,13 @@ class DesktopApp(tk.Tk):
             "Status update API URL (optional)",
             self.var_pachet_status_update_api_url,
         )
-        self._add_entry_row(frame, 7, "Import interval (seconds)", self.var_sync_interval)
+        self._add_entry_row(
+            frame,
+            7,
+            "Status update ID param (optional, ex: id_pachet)",
+            self.var_pachet_status_update_id_query_param,
+        )
+        self._add_entry_row(frame, 8, "Import interval (seconds)", self.var_sync_interval)
 
         payload_help = (
             "Expected payload:\n"
@@ -1110,7 +1163,7 @@ class DesktopApp(tk.Tk):
             "or {\"pachete\": [ ... ]}."
         )
         ttk.Label(frame, text=payload_help, wraplength=780, foreground="#4B5563").grid(
-            row=8,
+            row=9,
             column=0,
             columnspan=2,
             sticky="w",
@@ -1221,6 +1274,7 @@ class DesktopApp(tk.Tk):
         self.var_pachet_import_api_url.set(config.pachet_import_api_url)
         self.var_sync_api_token.set(config.sync_api_token)
         self.var_pachet_status_update_api_url.set(config.pachet_status_update_api_url)
+        self.var_pachet_status_update_id_query_param.set(config.pachet_status_update_id_query_param)
         self.var_pachet_import_token_query_param.set(config.pachet_import_token_query_param)
         self.var_pachet_import_headers_json.set(config.pachet_import_headers_json)
         self.var_pachet_import_user_agent.set(config.pachet_import_user_agent)
@@ -1265,6 +1319,7 @@ class DesktopApp(tk.Tk):
             pachet_import_api_url=self.var_pachet_import_api_url.get().strip(),
             sync_api_token=self.var_sync_api_token.get().strip(),
             pachet_status_update_api_url=self.var_pachet_status_update_api_url.get().strip(),
+            pachet_status_update_id_query_param=self.var_pachet_status_update_id_query_param.get().strip(),
             pachet_import_token_query_param=self.var_pachet_import_token_query_param.get().strip(),
             pachet_import_headers_json=self.var_pachet_import_headers_json.get().strip(),
             pachet_import_user_agent=self.var_pachet_import_user_agent.get().strip()

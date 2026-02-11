@@ -69,7 +69,8 @@ python desktop_stock_erp_app.py
 - **Import token query param**: daca API cere token in query string, ex. `token`
 - **Import headers JSON**: headere custom pentru import (ex: `{"X-Api-Key":"abc"}`)
 - **Import User-Agent**: util cand API-ul blocheaza user-agent-ul default
-- **Status update API URL (optional)**: dupa import reusit, aplicatia apeleaza acest endpoint cu `nr_doc` si `status=imported`
+- **Status update API URL (optional)**: dupa import reusit, aplicatia apeleaza acest endpoint
+- **Status update ID param (optional)**: numele parametrului pentru identificator (ex: `id_pachet`, `id_doc`, `nr_doc`)
 - **Import interval (seconds)**: la cat timp sa ruleze
 
 Payload suportat:
@@ -102,7 +103,10 @@ Exemplu pentru endpoint care cere token in query:
 Exemplu callback status dupa import:
 
 - Status update API URL: `https://deon.ro/erp/api/pachete/update-status`
-- Aplicatia va apela: `...?token=ParolaToken123!&nr_doc=<valoare>&status=imported`
+- Status update ID param: `id_pachet`
+- Aplicatia va apela: `...?id_pachet=<valoare>&status=imported&token=ParolaToken123!`
+- Valoarea trimisa este aleasa in ordinea: `id_pachet` -> `id_doc` -> `nr_doc`
+- Token-ul/parametrul de token este acelasi ca la import (`Import API token` + `Import token query param`).
 
 Sau lista:
 
@@ -168,7 +172,7 @@ WHERE ACTIVE = 1
 2. Apesi **Start scheduler**
 3. Aplicatia ruleaza in bucla:
    - ia pachetele `processing` din API si executa `producePachet` in Firebird
-   - pentru fiecare import reusit, apeleaza API-ul de status cu `nr_doc` si `status=imported` (daca este setat)
+   - pentru fiecare import reusit, apeleaza API-ul de status cu `<id_param>=valoare` si `status=imported` (daca este setat)
    - ruleaza select-ul de stoc, face CSV si upload la PHP
 4. Poti testa manual cu:
    - **Run import now**

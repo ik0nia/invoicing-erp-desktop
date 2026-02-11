@@ -11,6 +11,7 @@
   "pachet_import_api_url": "https://api.example.com/pachete/processing",
   "sync_api_token": "",
   "pachet_status_update_api_url": "https://api.example.com/pachete/update-status",
+  "pachet_status_update_id_query_param": "id_pachet",
   "pachet_import_token_query_param": "token",
   "pachet_import_headers_json": "",
   "pachet_import_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0",
