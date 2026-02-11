@@ -86,6 +86,7 @@ class AppConfig:
     upload_headers_json: str = ""
     upload_user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0"
     csv_directory: str = "exports"
+    audit_log_directory: str = "audit_logs"
     http_timeout_seconds: int = 30
     verify_ssl: bool = True
     extra_upload_fields_json: str = ""
@@ -127,6 +128,7 @@ class AppConfig:
                 )
             ),
             csv_directory=str(data.get("csv_directory", "exports")),
+            audit_log_directory=str(data.get("audit_log_directory", "audit_logs")),
             http_timeout_seconds=to_int(
                 data.get("http_timeout_seconds"),
                 default=30,
@@ -406,6 +408,110 @@ class IntegrationService:
             f"body={self._truncate_for_log(body_text)}"
         )
 
+    @staticmethod
+    def _extract_response_body(response: Any, max_length: int = 8000) -> str:
+        try:
+            payload = response.json()
+            body_text = json.dumps(payload, ensure_ascii=True)
+        except ValueError:
+            body_text = response.text
+
+        cleaned = body_text.strip()
+        if not cleaned:
+            return "<empty response body>"
+        if len(cleaned) <= max_length:
+            return cleaned
+        return f"{cleaned[:max_length]}..."
+
+    @staticmethod
+    def _extract_response_metrics(response: Any) -> dict[str, Any]:
+        try:
+            payload = response.json()
+        except ValueError:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+
+        metrics: dict[str, Any] = {}
+        for key in (
+            "products",
+            "updated_lines",
+            "inserted_lines",
+            "created_lines",
+            "errors",
+            "ok",
+            "status",
+            "message",
+        ):
+            if key in payload:
+                metrics[key] = payload[key]
+        return metrics
+
+    def _write_upload_audit_entry(
+        self,
+        config: AppConfig,
+        *,
+        csv_path: Path,
+        row_count: int,
+        upload_url: str,
+        status: str,
+        response: Any | None = None,
+        error: str = "",
+    ) -> Path:
+        audit_dir = Path(config.audit_log_directory).expanduser().resolve()
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        day_stamp = datetime.now().strftime("%Y%m%d")
+        audit_path = audit_dir / f"upload_audit_{day_stamp}.jsonl"
+
+        entry: dict[str, Any] = {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "status": status,
+            "upload_url": self._sanitize_url_for_log(upload_url),
+            "csv_path": str(csv_path.resolve()),
+            "csv_file_name": csv_path.name,
+            "row_count": int(row_count),
+        }
+        if error:
+            entry["error"] = error
+        if response is not None:
+            entry["http_status"] = int(response.status_code)
+            entry["response_content_type"] = (
+                str(response.headers.get("Content-Type", "unknown")).strip() or "unknown"
+            )
+            entry["response_body"] = self._extract_response_body(response)
+            entry.update(self._extract_response_metrics(response))
+
+        with audit_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=True))
+            handle.write("\n")
+
+        return audit_path
+
+    def _record_upload_audit(
+        self,
+        config: AppConfig,
+        *,
+        csv_path: Path,
+        row_count: int,
+        upload_url: str,
+        status: str,
+        response: Any | None = None,
+        error: str = "",
+    ) -> None:
+        try:
+            audit_path = self._write_upload_audit_entry(
+                config,
+                csv_path=csv_path,
+                row_count=row_count,
+                upload_url=upload_url,
+                status=status,
+                response=response,
+                error=error,
+            )
+            self.log(f"Upload audit saved: {audit_path}")
+        except Exception as exc:  # pylint: disable=broad-except
+            self.log(f"Warning: could not write upload audit entry: {exc}")
+
     def _write_csv(
         self,
         config: AppConfig,
@@ -448,30 +554,72 @@ class IntegrationService:
 
         form_data = self._parse_extra_fields(config.extra_upload_fields_json)
 
-        with csv_path.open("rb") as handle:
-            files = {
-                config.upload_field_name: (
-                    csv_path.name,
-                    handle,
-                    "text/csv",
+        response: Any | None = None
+        try:
+            with csv_path.open("rb") as handle:
+                files = {
+                    config.upload_field_name: (
+                        csv_path.name,
+                        handle,
+                        "text/csv",
+                    )
+                }
+                response = requests.post(
+                    final_url,
+                    headers=headers,
+                    data=form_data if form_data else None,
+                    files=files,
+                    timeout=config.http_timeout_seconds,
+                    verify=config.verify_ssl,
                 )
-            }
-            response = requests.post(
-                final_url,
-                headers=headers,
-                data=form_data if form_data else None,
-                files=files,
-                timeout=config.http_timeout_seconds,
-                verify=config.verify_ssl,
-            )
-            try:
                 response.raise_for_status()
-            except requests.HTTPError as exc:
-                raise RuntimeError(
+        except requests.HTTPError as exc:
+            if response is None:
+                raise RuntimeError(f"Upload failed: {exc}") from exc
+            error_message = (
+                f"Upload failed with HTTP {response.status_code}. "
+                f"Server response: {self._format_http_response_for_log(response)}"
+            )
+            self._record_upload_audit(
+                config,
+                csv_path=csv_path,
+                row_count=row_count,
+                upload_url=final_url,
+                status="http_error",
+                response=response,
+                error=error_message,
+            )
+            raise RuntimeError(error_message) from exc
+        except requests.RequestException as exc:
+            response = getattr(exc, "response", None)
+            error_message = f"Upload request failed: {exc}"
+            if response is not None:
+                error_message = (
                     f"Upload failed with HTTP {response.status_code}. "
                     f"Server response: {self._format_http_response_for_log(response)}"
-                ) from exc
+                )
+            self._record_upload_audit(
+                config,
+                csv_path=csv_path,
+                row_count=row_count,
+                upload_url=final_url,
+                status="request_error",
+                response=response,
+                error=error_message,
+            )
+            raise RuntimeError(error_message) from exc
 
+        if response is None:
+            raise RuntimeError("Upload failed: missing HTTP response.")
+
+        self._record_upload_audit(
+            config,
+            csv_path=csv_path,
+            row_count=row_count,
+            upload_url=final_url,
+            status="success",
+            response=response,
+        )
         sanitized_url = self._sanitize_url_for_log(final_url)
         self.log(
             f"CSV uploaded successfully to {sanitized_url} (status {response.status_code}, rows {row_count})."
@@ -597,6 +745,7 @@ class DesktopApp(tk.Tk):
         self.var_upload_headers_json = tk.StringVar()
         self.var_upload_user_agent = tk.StringVar()
         self.var_csv_directory = tk.StringVar()
+        self.var_audit_log_directory = tk.StringVar()
         self.var_http_timeout = tk.StringVar()
         self.var_verify_ssl = tk.BooleanVar()
         self.var_extra_upload_fields = tk.StringVar()
@@ -787,9 +936,10 @@ class DesktopApp(tk.Tk):
             pady=4,
         )
 
-        self._add_entry_row(frame, 9, "HTTP timeout (seconds)", self.var_http_timeout)
+        self._add_entry_row(frame, 9, "Audit log directory", self.var_audit_log_directory)
+        self._add_entry_row(frame, 10, "HTTP timeout (seconds)", self.var_http_timeout)
         ttk.Checkbutton(frame, text="Verify SSL certificate", variable=self.var_verify_ssl).grid(
-            row=10,
+            row=11,
             column=0,
             columnspan=2,
             sticky="w",
@@ -797,15 +947,15 @@ class DesktopApp(tk.Tk):
         )
         self._add_entry_row(
             frame,
-            11,
+            12,
             "Extra upload fields JSON (optional)",
             self.var_extra_upload_fields,
         )
 
-        ttk.Label(frame, text="Stock SELECT SQL").grid(row=12, column=0, sticky="nw", pady=(10, 4))
+        ttk.Label(frame, text="Stock SELECT SQL").grid(row=13, column=0, sticky="nw", pady=(10, 4))
         self.txt_stock_sql = tk.Text(frame, height=10, wrap="word")
-        self.txt_stock_sql.grid(row=12, column=1, sticky="nsew", pady=(10, 4))
-        frame.rowconfigure(12, weight=1)
+        self.txt_stock_sql.grid(row=13, column=1, sticky="nsew", pady=(10, 4))
+        frame.rowconfigure(13, weight=1)
 
     def _build_logs_tab(self, frame: ttk.Frame) -> None:
         frame.columnconfigure(0, weight=1)
@@ -857,6 +1007,7 @@ class DesktopApp(tk.Tk):
         self.var_upload_headers_json.set(config.upload_headers_json)
         self.var_upload_user_agent.set(config.upload_user_agent)
         self.var_csv_directory.set(config.csv_directory)
+        self.var_audit_log_directory.set(config.audit_log_directory)
         self.var_http_timeout.set(str(config.http_timeout_seconds))
         self.var_verify_ssl.set(config.verify_ssl)
         self.var_extra_upload_fields.set(config.extra_upload_fields_json)
@@ -896,6 +1047,7 @@ class DesktopApp(tk.Tk):
             upload_user_agent=self.var_upload_user_agent.get().strip()
             or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0",
             csv_directory=self.var_csv_directory.get().strip() or "exports",
+            audit_log_directory=self.var_audit_log_directory.get().strip() or "audit_logs",
             http_timeout_seconds=timeout,
             verify_ssl=self.var_verify_ssl.get(),
             extra_upload_fields_json=self.var_extra_upload_fields.get().strip(),

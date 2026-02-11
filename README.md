@@ -103,6 +103,7 @@ Sau:
 - **Upload headers JSON**: headere custom pentru upload (ex: `{"X-App-Key":"abc"}`)
 - **Upload User-Agent**: util cand serverul blocheaza `python-requests/*`
 - **CSV directory**: folder local unde salveaza fisierele CSV
+- **Audit log directory**: folder local pentru jurnalul upload-urilor (fisier `.jsonl`)
 - **HTTP timeout**: timeout request-uri
 - **Verify SSL**: validare certificat HTTPS
 - **Extra upload fields JSON**: campuri suplimentare trimise in POST
@@ -126,6 +127,8 @@ Exemplu mapare pentru comanda:
 
 Aplicatia afiseaza acum in log si corpul raspunsului serverului la erori HTTP (util pentru debug).
 La upload reusit, logul afiseaza si raspunsul API (JSON/text, trunchiat daca e foarte lung).
+In plus, fiecare upload (success/error) este salvat local in `audit_logs/upload_audit_YYYYMMDD.jsonl`
+(sau in folderul setat la `audit_log_directory`).
 
 Exemplu query:
 

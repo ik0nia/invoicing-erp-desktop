@@ -20,6 +20,7 @@
   "upload_headers_json": "{\"X-App-Key\":\"demo-key\"}",
   "upload_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0",
   "csv_directory": "exports",
+  "audit_log_directory": "audit_logs",
   "http_timeout_seconds": 30,
   "verify_ssl": true,
   "extra_upload_fields_json": "{\"source\":\"desktop-sync\"}"
