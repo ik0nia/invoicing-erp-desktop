@@ -234,6 +234,11 @@ def _quantize_money(value: Decimal) -> Decimal:
     return value.quantize(_MONEY_Q, rounding=ROUND_HALF_UP)
 
 
+def _operation_sign(pachet: PachetInput) -> int:
+    """Return +1 for normal production, -1 for storno/desfacere productie."""
+    return -1 if pachet.cantitate_produsa < 0 else 1
+
+
 def _to_decimal(value: Any, field_name: str) -> Decimal:
     try:
         return Decimal(str(value))
@@ -353,14 +358,16 @@ def validate_produce_pachet_input(payload: Any) -> ProducePachetInput:
         raise ValueError("pachet.id_doc must be > 0.")
     if pachet.status not in {"pending", "processing"}:
         raise ValueError("pachet.status must be 'processing' or 'pending'.")
-    if pachet.cantitate_produsa <= 0:
-        raise ValueError("pachet.cantitate_produsa must be > 0.")
+    if pachet.cantitate_produsa == 0:
+        raise ValueError("pachet.cantitate_produsa must be non-zero.")
     if pachet.pret_vanz < 0:
         raise ValueError("pachet.pret_vanz must be >= 0.")
-    if pachet.cost_total < 0:
-        raise ValueError("pachet.cost_total must be >= 0.")
+    if pachet.cost_total == 0:
+        raise ValueError("pachet.cost_total must be non-zero.")
     if _quantize_money(pachet.cota_tva) not in _VALID_TVA:
         raise ValueError("pachet.cota_tva must be one of: 0, 11, 21.")
+
+    expected_sign = 1 if pachet.cantitate_produsa > 0 else -1
 
     produse: list[ProdusInput] = []
     total_val_produse = Decimal("0")
@@ -369,12 +376,16 @@ def validate_produce_pachet_input(payload: Any) -> ProducePachetInput:
             raise ValueError(f"produse[{index}] must be an object.")
 
         cantitate = _to_decimal(produs_raw.get("cantitate"), f"produse[{index}].cantitate")
-        if cantitate <= 0:
-            raise ValueError(f"produse[{index}].cantitate must be > 0.")
+        if cantitate == 0:
+            raise ValueError(f"produse[{index}].cantitate must be non-zero.")
+        if (1 if cantitate > 0 else -1) != expected_sign:
+            raise ValueError(
+                f"produse[{index}].cantitate sign must match pachet.cantitate_produsa sign."
+            )
 
         val_produse = _to_decimal(produs_raw.get("val_produse"), f"produse[{index}].val_produse")
-        if val_produse < 0:
-            raise ValueError(f"produse[{index}].val_produse must be >= 0.")
+        if val_produse == 0:
+            raise ValueError(f"produse[{index}].val_produse must be non-zero.")
 
         cod_raw = str(produs_raw.get("cod_articol", ""))
         cod_db = normalizeCodArticol(cod_raw)
@@ -388,7 +399,10 @@ def validate_produce_pachet_input(payload: Any) -> ProducePachetInput:
         produse.append(produs)
         total_val_produse += val_produse
 
-    if _quantize_money(total_val_produse) != _quantize_money(pachet.cost_total):
+    if (
+        _quantize_money(total_val_produse) != _quantize_money(pachet.cost_total)
+        and _quantize_money(abs(total_val_produse)) != _quantize_money(abs(pachet.cost_total))
+    ):
         raise ValueError(
             "pachet.cost_total does not match SUM(produse[*].val_produse). "
             f"Expected {_quantize_money(total_val_produse)}, got {_quantize_money(pachet.cost_total)}."
@@ -397,7 +411,7 @@ def validate_produce_pachet_input(payload: Any) -> ProducePachetInput:
     return ProducePachetInput(pachet=pachet, produse=produse)
 
 
-def ensurePachetInArticole(cursor: Any, pachet: PachetInput) -> str:
+def ensurePachetInArticole(cursor: Any, pachet: PachetInput, allow_create: bool = True) -> str:
     """
     Ensure package exists in ARTICOLE and return COD in DB CHAR(16) format.
 
@@ -412,6 +426,12 @@ def ensurePachetInArticole(cursor: Any, pachet: PachetInput) -> str:
         if len(cod) < 16:
             cod = cod.strip().ljust(16)
         return cod[:16]
+
+    if not allow_create:
+        raise RuntimeError(
+            "Package article does not exist in ARTICOLE for storno/desfacere production "
+            f"(denumire='{pachet.denumire}')."
+        )
 
     cursor.execute(SQL_QUERIES["select_max_articole_cod8"])
     max_code = int(cursor.fetchone()[0] or 0)
@@ -571,8 +591,9 @@ def _pred_det_field_value(
     line_no: int,
 ) -> Any | None:
     upper = field_name.upper()
-    qty = abs(pachet.cantitate_produsa)
-    unit_price = pachet.pret_vanz
+    sign = _operation_sign(pachet)
+    qty = Decimal(sign) * abs(pachet.cantitate_produsa)
+    unit_price = Decimal(sign) * abs(pachet.pret_vanz)
 
     direct_values = {
         "ID_DOC": pachet.id_doc,
@@ -601,9 +622,9 @@ def _pred_det_field_value(
         "CANTITATE": qty,
         "CANT": qty,
         "QTY": qty,
-        "VALOARE": pachet.pret_vanz,
-        "VAL": pachet.pret_vanz,
-        "COST": pachet.pret_vanz,
+        "VALOARE": Decimal(sign) * abs(pachet.pret_vanz),
+        "VAL": Decimal(sign) * abs(pachet.pret_vanz),
+        "COST": Decimal(sign) * abs(pachet.pret_vanz),
         "PRET": unit_price,
         "PRET_VANZ": unit_price,
         "PRET_UNITAR": unit_price,
@@ -695,6 +716,7 @@ def _insert_pred_det_rows(
 
 def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> dict[str, Any]:
     pachet = request.pachet
+    is_storno = _operation_sign(pachet) < 0
     existing = _find_existing_document(cursor, pachet)
     if existing is not None:
         cod_pachet_db = str(existing.get("cod_pachet_db") or "")
@@ -713,7 +735,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
             "idUEnd": None,
         }
 
-    cod_pachet_db = ensurePachetInArticole(cursor, pachet)
+    cod_pachet_db = ensurePachetInArticole(cursor, pachet, allow_create=not is_storno)
     nr_doc = getNextNrDoc(cursor, pachet.data)
     miscari_has_pret = _miscari_has_pret_column(cursor)
     miscari_has_id_u = _miscari_has_id_u_column(cursor)
@@ -721,6 +743,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
     id_u_start = next_id_u if next_id_u is not None else None
 
     qty_produs = abs(pachet.cantitate_produsa)
+    qty_bp = -qty_produs if is_storno else qty_produs
     # Business order requested: BP first, then BC rows.
     if miscari_has_pret and miscari_has_id_u:
         current_id_u = int(next_id_u)
@@ -734,7 +757,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                 nr_doc,
                 "BP",
                 cod_pachet_db,
-                qty_produs,
+                qty_bp,
                 pachet.gestiune,
                 pachet.pret_vanz,
             ],
@@ -748,7 +771,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                 nr_doc,
                 "BP",
                 cod_pachet_db,
-                qty_produs,
+                qty_bp,
                 pachet.gestiune,
                 pachet.pret_vanz,
             ],
@@ -765,7 +788,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                 nr_doc,
                 "BP",
                 cod_pachet_db,
-                qty_produs,
+                qty_bp,
                 pachet.gestiune,
             ],
         )
@@ -778,13 +801,13 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                 nr_doc,
                 "BP",
                 cod_pachet_db,
-                qty_produs,
+                qty_bp,
                 pachet.gestiune,
             ],
         )
 
     for produs in request.produse:
-        qty_consum = -abs(produs.cantitate)
+        qty_consum = abs(produs.cantitate) if is_storno else -abs(produs.cantitate)
         if miscari_has_id_u:
             current_id_u = int(next_id_u)
             next_id_u = current_id_u + 1

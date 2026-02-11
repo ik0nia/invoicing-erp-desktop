@@ -242,6 +242,11 @@ Caracteristici:
 - ordinea inserarii in `MISCARI` este: intai `BP`, apoi liniile `BC`
 - la inserarea pachetului in `ARTICOLE`, `PRET_VANZ` si `PRET_V_TVA` nu sunt setate
 - in `PRED_DET`: `ID_UNIC = ID_DOC`, `NR = MAX(NR)+1`, `DEN_GEST = 'GESTIUNEA 1'`, `DEN_TIP = 'Produse finite'`, `PRET/VALOARE = pret_vanz`
+- cazul storno/desfacere productie (cantitati negative):
+  - `BP` se insereaza cu cantitate negativa
+  - liniile `BC` se insereaza cu cantitate pozitiva (reintrare in stoc)
+  - in `PRED_DET` operatiunea este cu semn minus
+  - produsul pachet trebuie sa existe deja in `ARTICOLE` (nu se creeaza automat)
 - evita dublurile: daca documentul exista deja pentru acelasi `id_doc + data`, nu mai insereaza inca o data
 - concurenta minima:
   - duplicate la inserarea in `ARTICOLE` -> recitire dupa `DENUMIRE`

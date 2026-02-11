@@ -413,6 +413,37 @@ WHERE ID = ?
 
             cursor.execute(
                 """
+SELECT
+    COALESCE(SUM(CASE WHEN TIP_DOC = 'BC' AND CANTITATE > 0 THEN 1 ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN TIP_DOC = 'BC' AND CANTITATE < 0 THEN 1 ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN TIP_DOC = 'BP' AND CANTITATE > 0 THEN 1 ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN TIP_DOC = 'BP' AND CANTITATE < 0 THEN 1 ELSE 0 END), 0)
+FROM MISCARI
+WHERE ID = ?
+  AND DATA = ?
+  AND NR_DOC = ?
+  AND TIP_DOC IN ('BC', 'BP')
+""".strip(),
+                [id_doc_value, data_value, nr_doc_value],
+            )
+            bc_pos_count, bc_neg_count, bp_pos_count, bp_neg_count = cursor.fetchone()
+            bc_pos_count_int = int(bc_pos_count or 0)
+            bc_neg_count_int = int(bc_neg_count or 0)
+            bp_pos_count_int = int(bp_pos_count or 0)
+            bp_neg_count_int = int(bp_neg_count or 0)
+
+            cant_produsa_raw = pachet_data.get("cantitate_produsa")
+            try:
+                cant_produsa = float(cant_produsa_raw)
+            except (TypeError, ValueError):
+                raise RuntimeError(
+                    "Cannot verify MISCARI sign rules: invalid pachet.cantitate_produsa "
+                    f"value '{cant_produsa_raw}'."
+                )
+            is_storno = cant_produsa < 0
+
+            cursor.execute(
+                """
 SELECT TRIM(RDB$FIELD_NAME)
 FROM RDB$RELATION_FIELDS
 WHERE TRIM(RDB$RELATION_NAME) = ?
@@ -517,13 +548,40 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
         elif pred_det_columns:
             pred_det_ok = False
 
-        ok = actual_bc == expected_bc_lines and actual_bp == expected_bp and pred_det_ok and id_u_ok
+        sign_ok = False
+        if is_storno:
+            sign_ok = (
+                bc_pos_count_int == expected_bc_lines
+                and bc_neg_count_int == 0
+                and bp_neg_count_int == expected_bp
+                and bp_pos_count_int == 0
+            )
+        else:
+            sign_ok = (
+                bc_neg_count_int == expected_bc_lines
+                and bc_pos_count_int == 0
+                and bp_pos_count_int == expected_bp
+                and bp_neg_count_int == 0
+            )
+
+        ok = (
+            actual_bc == expected_bc_lines
+            and actual_bp == expected_bp
+            and pred_det_ok
+            and id_u_ok
+            and sign_ok
+        )
         return {
             "ok": ok,
             "expected_bc": expected_bc_lines,
             "actual_bc": actual_bc,
             "expected_bp": expected_bp,
             "actual_bp": actual_bp,
+            "is_storno": is_storno,
+            "bc_pos_count": bc_pos_count_int,
+            "bc_neg_count": bc_neg_count_int,
+            "bp_pos_count": bp_pos_count_int,
+            "bp_neg_count": bp_neg_count_int,
             "id_u_checked": id_u_checked,
             "actual_id_u_min": actual_id_u_min,
             "actual_id_u_max": actual_id_u_max,
@@ -701,6 +759,9 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
                 self.log(
                     "Import Pachete Saga: DB verification for "
                     f"idDoc={result.get('idDoc')}, nrDoc={result.get('nrDoc')} "
+                    f"(storno={verification['is_storno']}, "
+                    f"BC+={verification['bc_pos_count']}, BC-={verification['bc_neg_count']}, "
+                    f"BP+={verification['bp_pos_count']}, BP-={verification['bp_neg_count']}), "
                     f"(ID_U checked={verification['id_u_checked']}, "
                     f"distinct={verification['distinct_id_u']}, "
                     f"min={verification['actual_id_u_min']}, "
@@ -713,6 +774,9 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
                 if not bool(verification["ok"]):
                     raise RuntimeError(
                         "DB verification failed after producePachet: "
+                        f"storno={verification['is_storno']}, "
+                        f"BC+={verification['bc_pos_count']}, BC-={verification['bc_neg_count']}, "
+                        f"BP+={verification['bp_pos_count']}, BP-={verification['bp_neg_count']}, "
                         f"ID_U checked={verification['id_u_checked']}, "
                         f"distinct={verification['distinct_id_u']}, "
                         f"min={verification['actual_id_u_min']}, "
