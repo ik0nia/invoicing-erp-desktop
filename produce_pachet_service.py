@@ -75,6 +75,10 @@ FROM RDB$RELATION_FIELDS
 WHERE TRIM(RDB$RELATION_NAME) = ?
   AND TRIM(RDB$FIELD_NAME) = ?
 """.strip(),
+    "select_max_miscari_id_u": """
+SELECT COALESCE(MAX(ID_U), 0)
+FROM MISCARI
+""".strip(),
     "select_relation_fields": """
 SELECT
     TRIM(rf.RDB$FIELD_NAME) AS FIELD_NAME,
@@ -506,6 +510,12 @@ def _miscari_has_id_u_column(cursor: Any) -> bool:
     return int(cursor.fetchone()[0] or 0) > 0
 
 
+def _get_next_miscari_id_u(cursor: Any) -> int:
+    cursor.execute(SQL_QUERIES["select_max_miscari_id_u"])
+    current_max = int(cursor.fetchone()[0] or 0)
+    return current_max + 1
+
+
 def _trim_db_char(value: str) -> str:
     return str(value or "").rstrip()
 
@@ -682,21 +692,27 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
             "idDoc": pachet.id_doc,
             "predDetInserted": 0,
             "alreadyImported": True,
+            "idUStart": None,
+            "idUEnd": None,
         }
 
     cod_pachet_db = ensurePachetInArticole(cursor, pachet)
     nr_doc = getNextNrDoc(cursor, pachet.data)
     miscari_has_pret = _miscari_has_pret_column(cursor)
     miscari_has_id_u = _miscari_has_id_u_column(cursor)
+    next_id_u = _get_next_miscari_id_u(cursor) if miscari_has_id_u else None
+    id_u_start = next_id_u if next_id_u is not None else None
 
     for produs in request.produse:
         qty_consum = -abs(produs.cantitate)
         if miscari_has_id_u:
+            current_id_u = int(next_id_u)
+            next_id_u = current_id_u + 1
             cursor.execute(
                 SQL_QUERIES["insert_miscari_consum_bc_with_id_u"],
                 [
                     pachet.id_doc,
-                    pachet.id_doc,
+                    current_id_u,
                     pachet.data,
                     nr_doc,
                     "BC",
@@ -721,11 +737,13 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
 
     qty_produs = abs(pachet.cantitate_produsa)
     if miscari_has_pret and miscari_has_id_u:
+        current_id_u = int(next_id_u)
+        next_id_u = current_id_u + 1
         cursor.execute(
             SQL_QUERIES["insert_miscari_produs_bp_with_pret_and_id_u"],
             [
                 pachet.id_doc,
-                pachet.id_doc,
+                current_id_u,
                 pachet.data,
                 nr_doc,
                 "BP",
@@ -750,11 +768,13 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
             ],
         )
     elif miscari_has_id_u:
+        current_id_u = int(next_id_u)
+        next_id_u = current_id_u + 1
         cursor.execute(
             SQL_QUERIES["insert_miscari_produs_bp_without_pret_and_id_u"],
             [
                 pachet.id_doc,
-                pachet.id_doc,
+                current_id_u,
                 pachet.data,
                 nr_doc,
                 "BP",
@@ -783,6 +803,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         cod_pachet_db=cod_pachet_db,
         nr_doc=nr_doc,
     )
+    id_u_end = (int(next_id_u) - 1) if next_id_u is not None else None
 
     return {
         "success": True,
@@ -792,6 +813,8 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         "idDoc": pachet.id_doc,
         "predDetInserted": pred_det_inserted,
         "alreadyImported": False,
+        "idUStart": id_u_start,
+        "idUEnd": id_u_end,
     }
 
 

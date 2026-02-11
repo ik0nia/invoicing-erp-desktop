@@ -428,6 +428,9 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
             id_u_ok = True
             if "ID_U" in miscari_columns:
                 id_u_checked = True
+                expected_total_lines = expected_bc_lines + 1
+                expected_id_u_start = produce_result.get("idUStart")
+                expected_id_u_end = produce_result.get("idUEnd")
                 cursor.execute(
                     """
 SELECT MIN(ID_U), MAX(ID_U), COUNT(DISTINCT ID_U)
@@ -447,10 +450,17 @@ WHERE ID = ?
                 if distinct_count is not None:
                     distinct_id_u = int(distinct_count)
                 id_u_ok = (
-                    distinct_id_u == 1
-                    and actual_id_u_min == id_doc_value
-                    and actual_id_u_max == id_doc_value
+                    distinct_id_u == expected_total_lines
+                    and actual_id_u_min is not None
+                    and actual_id_u_max is not None
+                    and (actual_id_u_max - actual_id_u_min + 1) == expected_total_lines
                 )
+                if expected_id_u_start not in (None, "") and expected_id_u_end not in (None, ""):
+                    id_u_ok = (
+                        id_u_ok
+                        and actual_id_u_min == int(expected_id_u_start)
+                        and actual_id_u_max == int(expected_id_u_end)
+                    )
 
             cursor.execute(
                 """
