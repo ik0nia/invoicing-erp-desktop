@@ -522,13 +522,13 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
 
                 if "ID_UNIC" in pred_det_columns:
                     where_parts.append("ID_UNIC = ?")
-                    params.append(id_doc_value)
+                    params.append(miscari_id_value)
                 elif "ID_DOC" in pred_det_columns:
                     where_parts.append("ID_DOC = ?")
                     params.append(id_doc_value)
                 elif "ID" in pred_det_columns:
                     where_parts.append("ID = ?")
-                    params.append(id_doc_value)
+                    params.append(miscari_id_value)
 
                 if "DATA" in pred_det_columns:
                     where_parts.append("DATA = ?")

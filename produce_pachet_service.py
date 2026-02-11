@@ -73,6 +73,12 @@ FROM PRED_DET
 WHERE ID_UNIC = ?
 ORDER BY NR_DOC DESC
 """.strip(),
+    "select_pred_det_existing_nr_doc_by_id_doc": """
+SELECT FIRST 1 NR_DOC
+FROM PRED_DET
+WHERE ID_DOC = ?
+ORDER BY NR_DOC DESC
+""".strip(),
     "select_doc_counts_by_date_nr_doc": """
 SELECT
     COALESCE(SUM(CASE WHEN TIP_DOC = 'BC' THEN 1 ELSE 0 END), 0),
@@ -508,13 +514,22 @@ def _find_existing_document(cursor: Any, pachet: PachetInput) -> dict[str, Any] 
     Returns existing nr_doc and pachet code when found.
     Raises if document looks partially imported (only BC or only BP).
     """
-    # MISCARI.ID is now generated as MAX(ID)+1, so the stable external link
-    # for idempotency is PRED_DET.ID_UNIC (payload id_doc).
+    # MISCARI.ID is generated as MAX(ID)+1.
+    # For idempotency we first try PRED_DET.ID_DOC (payload id_doc), then
+    # fall back to legacy rows where ID_UNIC previously stored payload id_doc.
+    pred_row = None
     try:
-        cursor.execute(SQL_QUERIES["select_pred_det_existing_nr_doc_by_id_unic"], [pachet.id_doc])
+        cursor.execute(SQL_QUERIES["select_pred_det_existing_nr_doc_by_id_doc"], [pachet.id_doc])
         pred_row = cursor.fetchone()
     except Exception:
         pred_row = None
+    if not pred_row:
+        # Backward compatibility for older imports where ID_UNIC was mapped to payload id_doc.
+        try:
+            cursor.execute(SQL_QUERIES["select_pred_det_existing_nr_doc_by_id_unic"], [pachet.id_doc])
+            pred_row = cursor.fetchone()
+        except Exception:
+            pred_row = None
 
     if not pred_row:
         return None
@@ -636,6 +651,7 @@ def _pred_det_field_value(
     pachet: PachetInput,
     first_produs: ProdusInput,
     cod_pachet_db: str,
+    miscari_doc_id: int,
     nr_doc: int,
     pred_det_nr: int | None,
     line_no: int,
@@ -652,9 +668,9 @@ def _pred_det_field_value(
         "IDDOC": pachet.id_doc,
         "DOC_ID": pachet.id_doc,
         "ID_DOCUMENT": pachet.id_doc,
-        "ID": pachet.id_doc,
-        "ID_UNIC": pachet.id_doc,
-        "IDUNIC": pachet.id_doc,
+        "ID": miscari_doc_id,
+        "ID_UNIC": miscari_doc_id,
+        "IDUNIC": miscari_doc_id,
         "DATA": pachet.data,
         "DATA_DOC": pachet.data,
         "NR_DOC": nr_doc,
@@ -717,6 +733,7 @@ def _insert_pred_det_rows(
     cursor: Any,
     request: ProducePachetInput,
     cod_pachet_db: str,
+    miscari_doc_id: int,
     nr_doc: int,
 ) -> int:
     fields = _get_relation_fields(cursor, "PRED_DET")
@@ -745,6 +762,7 @@ def _insert_pred_det_rows(
             pachet=pachet,
             first_produs=first_produs,
             cod_pachet_db=cod_pachet_db,
+            miscari_doc_id=miscari_doc_id,
             nr_doc=nr_doc,
             pred_det_nr=pred_det_nr,
             line_no=line_no,
@@ -904,6 +922,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         cursor=cursor,
         request=request,
         cod_pachet_db=cod_pachet_db,
+        miscari_doc_id=miscari_doc_id,
         nr_doc=nr_doc,
     )
     id_u_end = (int(next_id_u) - 1) if next_id_u is not None else None
