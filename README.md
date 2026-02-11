@@ -236,6 +236,7 @@ Caracteristici:
 - query-uri parametrizate (`?`) pentru toate operatiile
 - o singura tranzactie (`COMMIT` la succes, `ROLLBACK` la eroare)
 - `ID_DOC` este folosit identic pentru toate inserarile in `MISCARI`
+- daca exista coloana `ID_U` in `MISCARI`, este setata explicit cu aceeasi valoare ca `ID_DOC` (nu se incrementeaza pe linii)
 - `NR_DOC` este calculat `MAX(NR_DOC)+1` pe aceeasi data pentru `TIP_DOC='BP'`
 - insereaza consumurile/produsul finit in `MISCARI` si 1 rand de productie in `PRED_DET` (daca tabelul exista)
 - evita dublurile: daca documentul exista deja pentru acelasi `id_doc + data`, nu mai insereaza inca o data

@@ -417,6 +417,47 @@ SELECT TRIM(RDB$FIELD_NAME)
 FROM RDB$RELATION_FIELDS
 WHERE TRIM(RDB$RELATION_NAME) = ?
 """.strip(),
+                ["MISCARI"],
+            )
+            miscari_columns = {str(row[0]).upper() for row in cursor.fetchall()}
+
+            id_u_checked = False
+            actual_id_u_min: int | None = None
+            actual_id_u_max: int | None = None
+            distinct_id_u: int | None = None
+            id_u_ok = True
+            if "ID_U" in miscari_columns:
+                id_u_checked = True
+                cursor.execute(
+                    """
+SELECT MIN(ID_U), MAX(ID_U), COUNT(DISTINCT ID_U)
+FROM MISCARI
+WHERE ID = ?
+  AND DATA = ?
+  AND NR_DOC = ?
+  AND TIP_DOC IN ('BC', 'BP')
+""".strip(),
+                    [id_doc_value, data_value, nr_doc_value],
+                )
+                min_id_u, max_id_u, distinct_count = cursor.fetchone()
+                if min_id_u is not None:
+                    actual_id_u_min = int(min_id_u)
+                if max_id_u is not None:
+                    actual_id_u_max = int(max_id_u)
+                if distinct_count is not None:
+                    distinct_id_u = int(distinct_count)
+                id_u_ok = (
+                    distinct_id_u == 1
+                    and actual_id_u_min == id_doc_value
+                    and actual_id_u_max == id_doc_value
+                )
+
+            cursor.execute(
+                """
+SELECT TRIM(RDB$FIELD_NAME)
+FROM RDB$RELATION_FIELDS
+WHERE TRIM(RDB$RELATION_NAME) = ?
+""".strip(),
                 ["PRED_DET"],
             )
             pred_det_columns = {str(row[0]).upper() for row in cursor.fetchall()}
@@ -466,13 +507,17 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
         elif pred_det_columns:
             pred_det_ok = False
 
-        ok = actual_bc == expected_bc_lines and actual_bp == expected_bp and pred_det_ok
+        ok = actual_bc == expected_bc_lines and actual_bp == expected_bp and pred_det_ok and id_u_ok
         return {
             "ok": ok,
             "expected_bc": expected_bc_lines,
             "actual_bc": actual_bc,
             "expected_bp": expected_bp,
             "actual_bp": actual_bp,
+            "id_u_checked": id_u_checked,
+            "actual_id_u_min": actual_id_u_min,
+            "actual_id_u_max": actual_id_u_max,
+            "distinct_id_u": distinct_id_u,
             "pred_det_checked": pred_det_checked,
             "expected_pred_det": expected_pred_det,
             "actual_pred_det": actual_pred_det,
@@ -646,6 +691,10 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
                 self.log(
                     "Import Pachete Saga: DB verification for "
                     f"idDoc={result.get('idDoc')}, nrDoc={result.get('nrDoc')} "
+                    f"(ID_U checked={verification['id_u_checked']}, "
+                    f"distinct={verification['distinct_id_u']}, "
+                    f"min={verification['actual_id_u_min']}, "
+                    f"max={verification['actual_id_u_max']}), "
                     f"(BC {verification['actual_bc']}/{verification['expected_bc']}, "
                     f"BP {verification['actual_bp']}/{verification['expected_bp']}, "
                     f"PRED_DET {verification['actual_pred_det']}/{verification['expected_pred_det']} "
@@ -654,6 +703,10 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
                 if not bool(verification["ok"]):
                     raise RuntimeError(
                         "DB verification failed after producePachet: "
+                        f"ID_U checked={verification['id_u_checked']}, "
+                        f"distinct={verification['distinct_id_u']}, "
+                        f"min={verification['actual_id_u_min']}, "
+                        f"max={verification['actual_id_u_max']}, "
                         f"BC {verification['actual_bc']}/{verification['expected_bc']}, "
                         f"BP {verification['actual_bp']}/{verification['expected_bp']}, "
                         f"PRED_DET {verification['actual_pred_det']}/{verification['expected_pred_det']} "

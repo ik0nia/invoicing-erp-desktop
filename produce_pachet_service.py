@@ -98,6 +98,18 @@ INSERT INTO MISCARI (
     GESTIUNE
 ) VALUES (?, ?, ?, ?, ?, ?, ?)
 """.strip(),
+    "insert_miscari_consum_bc_with_id_u": """
+INSERT INTO MISCARI (
+    ID,
+    ID_U,
+    DATA,
+    NR_DOC,
+    TIP_DOC,
+    COD_ART,
+    CANTITATE,
+    GESTIUNE
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+""".strip(),
     "insert_miscari_produs_bp_with_pret": """
 INSERT INTO MISCARI (
     ID,
@@ -110,6 +122,19 @@ INSERT INTO MISCARI (
     PRET
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 """.strip(),
+    "insert_miscari_produs_bp_with_pret_and_id_u": """
+INSERT INTO MISCARI (
+    ID,
+    ID_U,
+    DATA,
+    NR_DOC,
+    TIP_DOC,
+    COD_ART,
+    CANTITATE,
+    GESTIUNE,
+    PRET
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+""".strip(),
     "insert_miscari_produs_bp_without_pret": """
 INSERT INTO MISCARI (
     ID,
@@ -120,6 +145,18 @@ INSERT INTO MISCARI (
     CANTITATE,
     GESTIUNE
 ) VALUES (?, ?, ?, ?, ?, ?, ?)
+""".strip(),
+    "insert_miscari_produs_bp_without_pret_and_id_u": """
+INSERT INTO MISCARI (
+    ID,
+    ID_U,
+    DATA,
+    NR_DOC,
+    TIP_DOC,
+    COD_ART,
+    CANTITATE,
+    GESTIUNE
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 """.strip(),
 }
 
@@ -464,6 +501,11 @@ def _miscari_has_pret_column(cursor: Any) -> bool:
     return int(cursor.fetchone()[0] or 0) > 0
 
 
+def _miscari_has_id_u_column(cursor: Any) -> bool:
+    cursor.execute(SQL_QUERIES["check_miscari_has_pret_column"], ["MISCARI", "ID_U"])
+    return int(cursor.fetchone()[0] or 0) > 0
+
+
 def _trim_db_char(value: str) -> str:
     return str(value or "").rstrip()
 
@@ -645,24 +687,55 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
     cod_pachet_db = ensurePachetInArticole(cursor, pachet)
     nr_doc = getNextNrDoc(cursor, pachet.data)
     miscari_has_pret = _miscari_has_pret_column(cursor)
+    miscari_has_id_u = _miscari_has_id_u_column(cursor)
 
     for produs in request.produse:
         qty_consum = -abs(produs.cantitate)
+        if miscari_has_id_u:
+            cursor.execute(
+                SQL_QUERIES["insert_miscari_consum_bc_with_id_u"],
+                [
+                    pachet.id_doc,
+                    pachet.id_doc,
+                    pachet.data,
+                    nr_doc,
+                    "BC",
+                    produs.cod_articol_db,
+                    qty_consum,
+                    pachet.gestiune,
+                ],
+            )
+        else:
+            cursor.execute(
+                SQL_QUERIES["insert_miscari_consum_bc"],
+                [
+                    pachet.id_doc,
+                    pachet.data,
+                    nr_doc,
+                    "BC",
+                    produs.cod_articol_db,
+                    qty_consum,
+                    pachet.gestiune,
+                ],
+            )
+
+    qty_produs = abs(pachet.cantitate_produsa)
+    if miscari_has_pret and miscari_has_id_u:
         cursor.execute(
-            SQL_QUERIES["insert_miscari_consum_bc"],
+            SQL_QUERIES["insert_miscari_produs_bp_with_pret_and_id_u"],
             [
+                pachet.id_doc,
                 pachet.id_doc,
                 pachet.data,
                 nr_doc,
-                "BC",
-                produs.cod_articol_db,
-                qty_consum,
+                "BP",
+                cod_pachet_db,
+                qty_produs,
                 pachet.gestiune,
+                pachet.pret_vanz,
             ],
         )
-
-    qty_produs = abs(pachet.cantitate_produsa)
-    if miscari_has_pret:
+    elif miscari_has_pret:
         cursor.execute(
             SQL_QUERIES["insert_miscari_produs_bp_with_pret"],
             [
@@ -674,6 +747,20 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                 qty_produs,
                 pachet.gestiune,
                 pachet.pret_vanz,
+            ],
+        )
+    elif miscari_has_id_u:
+        cursor.execute(
+            SQL_QUERIES["insert_miscari_produs_bp_without_pret_and_id_u"],
+            [
+                pachet.id_doc,
+                pachet.id_doc,
+                pachet.data,
+                nr_doc,
+                "BP",
+                cod_pachet_db,
+                qty_produs,
+                pachet.gestiune,
             ],
         )
     else:
