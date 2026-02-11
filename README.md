@@ -99,6 +99,7 @@ Sau:
 - **Upload URL**: endpoint PHP care primeste CSV
 - **Upload file field name**: implicit `file`
 - **Upload API token**: token separat pentru upload (optional; daca e gol se foloseste token-ul din API sync)
+- **Upload token query param**: daca API vrea token in query string, ex. `token`
 - **Upload headers JSON**: headere custom pentru upload (ex: `{"X-App-Key":"abc"}`)
 - **Upload User-Agent**: util cand serverul blocheaza `python-requests/*`
 - **CSV directory**: folder local unde salveaza fisierele CSV
@@ -114,6 +115,14 @@ Daca primesti 403 la upload, verifica:
 - tokenul/header-ele cerute de server
 - `Upload file field name` (sa fie exact cum asteapta serverul, ex: `file` sau `csv`)
 - User-Agent (unele servere blocheaza requests default)
+
+Exemplu mapare pentru comanda:
+`curl -X POST "https://deon.ro/erp/api/stock/import?token=ParolaToken123!" -F "stock_csv=@/path/stoc.csv"`
+
+- Upload URL: `https://deon.ro/erp/api/stock/import`
+- Upload file field name: `stock_csv`
+- Upload API token: `ParolaToken123!`
+- Upload token query param: `token`
 
 Aplicatia afiseaza acum in log si corpul raspunsului serverului la erori HTTP (util pentru debug).
 

@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -81,6 +82,7 @@ class AppConfig:
     upload_url: str = ""
     upload_field_name: str = "file"
     upload_api_token: str = ""
+    upload_token_query_param: str = ""
     upload_headers_json: str = ""
     upload_user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0"
     csv_directory: str = "exports"
@@ -116,6 +118,7 @@ class AppConfig:
             upload_url=str(data.get("upload_url", "")),
             upload_field_name=str(data.get("upload_field_name", "file")),
             upload_api_token=str(data.get("upload_api_token", "")),
+            upload_token_query_param=str(data.get("upload_token_query_param", "")),
             upload_headers_json=str(data.get("upload_headers_json", "")),
             upload_user_agent=str(
                 data.get(
@@ -162,6 +165,14 @@ class IntegrationService:
     def __init__(self, log_fn: Callable[[str], None]) -> None:
         self.log = log_fn
         self._dll_dir_handles: list[Any] = []
+        self._sensitive_query_keys = {
+            "token",
+            "access_token",
+            "api_key",
+            "apikey",
+            "key",
+            "password",
+        }
 
     def _ensure_dependencies(self) -> None:
         if requests is None:
@@ -260,7 +271,7 @@ class IntegrationService:
         if token:
             headers["Authorization"] = f"Bearer {token}"
 
-        self.log(f"Fetching SQL commands from API: {url}")
+        self.log(f"Fetching SQL commands from API: {self._sanitize_url_for_log(url)}")
         response = requests.get(
             url,
             headers=headers,
@@ -339,6 +350,41 @@ class IntegrationService:
             return value.rstrip(" \t")
         return value
 
+    @staticmethod
+    def _with_query_param(url: str, key: str, value: str) -> str:
+        parts = urlsplit(url)
+        query_items = parse_qsl(parts.query, keep_blank_values=True)
+        filtered = [(k, v) for k, v in query_items if k != key]
+        filtered.append((key, value))
+        return urlunsplit(
+            (
+                parts.scheme,
+                parts.netloc,
+                parts.path,
+                urlencode(filtered, doseq=True),
+                parts.fragment,
+            )
+        )
+
+    def _sanitize_url_for_log(self, url: str) -> str:
+        parts = urlsplit(url)
+        query_items = parse_qsl(parts.query, keep_blank_values=True)
+        sanitized = []
+        for key, value in query_items:
+            if key.lower() in self._sensitive_query_keys:
+                sanitized.append((key, "***"))
+            else:
+                sanitized.append((key, value))
+        return urlunsplit(
+            (
+                parts.scheme,
+                parts.netloc,
+                parts.path,
+                urlencode(sanitized, doseq=True),
+                parts.fragment,
+            )
+        )
+
     def _write_csv(
         self,
         config: AppConfig,
@@ -371,15 +417,15 @@ class IntegrationService:
             headers["User-Agent"] = user_agent
 
         token = config.upload_api_token.strip() or config.sync_api_token.strip()
-        if token:
+        token_query_param = config.upload_token_query_param.strip()
+        final_url = url
+        if token and token_query_param:
+            final_url = self._with_query_param(url, token_query_param, token)
+        elif token:
             headers["Authorization"] = f"Bearer {token}"
         headers.update(self._parse_extra_fields(config.upload_headers_json))
 
-        form_data = {
-            "generated_at": datetime.now().isoformat(timespec="seconds"),
-            "row_count": str(row_count),
-        }
-        form_data.update(self._parse_extra_fields(config.extra_upload_fields_json))
+        form_data = self._parse_extra_fields(config.extra_upload_fields_json)
 
         with csv_path.open("rb") as handle:
             files = {
@@ -390,9 +436,9 @@ class IntegrationService:
                 )
             }
             response = requests.post(
-                url,
+                final_url,
                 headers=headers,
-                data=form_data,
+                data=form_data if form_data else None,
                 files=files,
                 timeout=config.http_timeout_seconds,
                 verify=config.verify_ssl,
@@ -409,7 +455,10 @@ class IntegrationService:
                     f"Upload failed with HTTP {response.status_code}. Server response: {body}"
                 ) from exc
 
-        self.log(f"CSV uploaded successfully to {url} (status {response.status_code}).")
+        sanitized_url = self._sanitize_url_for_log(final_url)
+        self.log(
+            f"CSV uploaded successfully to {sanitized_url} (status {response.status_code}, rows {row_count})."
+        )
 
     def run_export_once(self, config: AppConfig, ignore_disabled: bool = False) -> None:
         self._ensure_dependencies()
@@ -526,6 +575,7 @@ class DesktopApp(tk.Tk):
         self.var_upload_url = tk.StringVar()
         self.var_upload_field_name = tk.StringVar()
         self.var_upload_api_token = tk.StringVar()
+        self.var_upload_token_query_param = tk.StringVar()
         self.var_upload_headers_json = tk.StringVar()
         self.var_upload_user_agent = tk.StringVar()
         self.var_csv_directory = tk.StringVar()
@@ -693,29 +743,35 @@ class DesktopApp(tk.Tk):
         self._add_entry_row(
             frame,
             5,
+            "Upload token query param (optional, ex: token)",
+            self.var_upload_token_query_param,
+        )
+        self._add_entry_row(
+            frame,
+            6,
             "Upload headers JSON (optional)",
             self.var_upload_headers_json,
         )
-        self._add_entry_row(frame, 6, "Upload User-Agent", self.var_upload_user_agent)
+        self._add_entry_row(frame, 7, "Upload User-Agent", self.var_upload_user_agent)
 
-        ttk.Label(frame, text="CSV directory").grid(row=7, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="CSV directory").grid(row=8, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=self.var_csv_directory, width=78).grid(
-            row=7,
+            row=8,
             column=1,
             sticky="ew",
             pady=4,
         )
         ttk.Button(frame, text="Browse...", command=self._browse_csv_folder).grid(
-            row=7,
+            row=8,
             column=2,
             sticky="ew",
             padx=(6, 0),
             pady=4,
         )
 
-        self._add_entry_row(frame, 8, "HTTP timeout (seconds)", self.var_http_timeout)
+        self._add_entry_row(frame, 9, "HTTP timeout (seconds)", self.var_http_timeout)
         ttk.Checkbutton(frame, text="Verify SSL certificate", variable=self.var_verify_ssl).grid(
-            row=9,
+            row=10,
             column=0,
             columnspan=2,
             sticky="w",
@@ -723,15 +779,15 @@ class DesktopApp(tk.Tk):
         )
         self._add_entry_row(
             frame,
-            10,
+            11,
             "Extra upload fields JSON (optional)",
             self.var_extra_upload_fields,
         )
 
-        ttk.Label(frame, text="Stock SELECT SQL").grid(row=11, column=0, sticky="nw", pady=(10, 4))
+        ttk.Label(frame, text="Stock SELECT SQL").grid(row=12, column=0, sticky="nw", pady=(10, 4))
         self.txt_stock_sql = tk.Text(frame, height=10, wrap="word")
-        self.txt_stock_sql.grid(row=11, column=1, sticky="nsew", pady=(10, 4))
-        frame.rowconfigure(11, weight=1)
+        self.txt_stock_sql.grid(row=12, column=1, sticky="nsew", pady=(10, 4))
+        frame.rowconfigure(12, weight=1)
 
     def _build_logs_tab(self, frame: ttk.Frame) -> None:
         frame.columnconfigure(0, weight=1)
@@ -779,6 +835,7 @@ class DesktopApp(tk.Tk):
         self.var_upload_url.set(config.upload_url)
         self.var_upload_field_name.set(config.upload_field_name)
         self.var_upload_api_token.set(config.upload_api_token)
+        self.var_upload_token_query_param.set(config.upload_token_query_param)
         self.var_upload_headers_json.set(config.upload_headers_json)
         self.var_upload_user_agent.set(config.upload_user_agent)
         self.var_csv_directory.set(config.csv_directory)
@@ -816,6 +873,7 @@ class DesktopApp(tk.Tk):
             upload_url=self.var_upload_url.get().strip(),
             upload_field_name=upload_field,
             upload_api_token=self.var_upload_api_token.get().strip(),
+            upload_token_query_param=self.var_upload_token_query_param.get().strip(),
             upload_headers_json=self.var_upload_headers_json.get().strip(),
             upload_user_agent=self.var_upload_user_agent.get().strip()
             or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0",
