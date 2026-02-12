@@ -1,2 +1,4 @@
 firebird-driver
 requests
+pystray
+Pillow

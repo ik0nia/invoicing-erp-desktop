@@ -60,6 +60,7 @@ python desktop_stock_erp_app.py
 - **User/Password**: ex. `SYSDBA` / `masterkey`
 - **Charset**: ex. `UTF8`
 - **Firebird client library (fbclient.dll)**: optional, dar recomandat daca aplicatia nu gaseste automat clientul Firebird
+- **Start minimized in system tray (near clock)**: porneste aplicatia direct in tray; deschiderea se face din iconita
 
 ### 2) Tab Import Pachete Saga
 
@@ -72,6 +73,7 @@ python desktop_stock_erp_app.py
 - **Status update API URL (optional)**: dupa import reusit, aplicatia apeleaza acest endpoint
 - **Status update ID param (optional)**: numele parametrului pentru identificator (ex: `id_pachet`, `id_doc`, `nr_doc`)
 - **Import interval (seconds)**: la cat timp sa ruleze
+- **Import schedule start / end (HH:MM, optional)**: fereastra orara in care jobul de import are voie sa ruleze
 
 Payload suportat:
 
@@ -122,6 +124,7 @@ Sau lista:
 
 - **Enable periodic stock export job**: activeaza exportul periodic
 - **Export interval (seconds)**: la cat timp ruleaza query-ul de stoc
+- **Export schedule start / end (HH:MM, optional)**: fereastra orara in care jobul de export are voie sa ruleze
 - **Upload URL**: endpoint PHP care primeste CSV
 - **Upload file field name**: implicit `file`
 - **Upload API token**: token separat pentru upload (optional; daca e gol se foloseste token-ul din Import Pachete Saga)
@@ -179,7 +182,7 @@ WHERE ACTIVE = 1
    - **Run import now**
    - **Run export now**
 
-Toate actiunile apar in tab-ul **Logs**.
+Toate actiunile apar in tab-ul **Logs** (culori pe severitate, scrollbar orizontal/vertical, export in fisier).
 
 ---
 

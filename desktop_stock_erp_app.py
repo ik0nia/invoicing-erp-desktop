@@ -10,7 +10,7 @@ import queue
 import threading
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -45,6 +45,17 @@ except Exception as exc:  # pragma: no cover - import guard
 else:
     PRODUCE_PACHET_IMPORT_ERROR = None
 
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+except Exception as exc:  # pragma: no cover - import guard
+    pystray = None
+    Image = None
+    ImageDraw = None
+    TRAY_IMPORT_ERROR = exc
+else:
+    TRAY_IMPORT_ERROR = None
+
 CONFIG_PATH = Path("config.json")
 IMPORT_RUNTIME_TAG = "bon-consumption-trace-2026-02-12-01"
 
@@ -73,6 +84,16 @@ def to_bool(value: Any, default: bool) -> bool:
     return default
 
 
+def parse_hhmm(value: str, field_name: str) -> dt_time:
+    text = value.strip()
+    if not text:
+        raise ValueError(f"{field_name} is empty.")
+    try:
+        return datetime.strptime(text, "%H:%M").time()
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be in HH:MM format (24h).") from exc
+
+
 @dataclass
 class AppConfig:
     db_path: str = ""
@@ -82,8 +103,11 @@ class AppConfig:
     db_password: str = "masterkey"
     db_charset: str = "UTF8"
     fb_client_library_path: str = ""
+    start_in_tray: bool = True
     enable_sync_job: bool = True
     sync_interval_seconds: int = 120
+    sync_window_start: str = ""
+    sync_window_end: str = ""
     pachet_import_api_url: str = ""
     sync_api_token: str = ""
     pachet_status_update_api_url: str = ""
@@ -93,6 +117,8 @@ class AppConfig:
     pachet_import_user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0"
     enable_export_job: bool = True
     export_interval_seconds: int = 300
+    export_window_start: str = ""
+    export_window_end: str = ""
     stock_select_sql: str = "SELECT SKU, QTY FROM STOCKS"
     upload_url: str = ""
     upload_field_name: str = "file"
@@ -116,12 +142,15 @@ class AppConfig:
             db_password=str(data.get("db_password", "masterkey")),
             db_charset=str(data.get("db_charset", "UTF8")),
             fb_client_library_path=str(data.get("fb_client_library_path", "")),
+            start_in_tray=to_bool(data.get("start_in_tray"), default=True),
             enable_sync_job=to_bool(data.get("enable_sync_job"), default=True),
             sync_interval_seconds=to_int(
                 data.get("sync_interval_seconds"),
                 default=120,
                 minimum=5,
             ),
+            sync_window_start=str(data.get("sync_window_start", "")).strip(),
+            sync_window_end=str(data.get("sync_window_end", "")).strip(),
             pachet_import_api_url=str(data.get("pachet_import_api_url", "")),
             sync_api_token=str(data.get("sync_api_token", "")),
             pachet_status_update_api_url=str(data.get("pachet_status_update_api_url", "")),
@@ -140,6 +169,8 @@ class AppConfig:
                 default=300,
                 minimum=10,
             ),
+            export_window_start=str(data.get("export_window_start", "")).strip(),
+            export_window_end=str(data.get("export_window_end", "")).strip(),
             stock_select_sql=str(data.get("stock_select_sql", "SELECT SKU, QTY FROM STOCKS")),
             upload_url=str(data.get("upload_url", "")),
             upload_field_name=str(data.get("upload_field_name", "file")),
@@ -1429,20 +1460,56 @@ class SchedulerEngine:
         except Exception as exc:  # pylint: disable=broad-except
             self.log(f"{name} job failed: {exc}")
 
+    @staticmethod
+    def _is_within_window(start_text: str, end_text: str) -> bool:
+        start_raw = start_text.strip()
+        end_raw = end_text.strip()
+        if not start_raw and not end_raw:
+            return True
+        # Validation in UI enforces both when one is set.
+        if not start_raw or not end_raw:
+            return True
+
+        start = parse_hhmm(start_raw, "window start")
+        end = parse_hhmm(end_raw, "window end")
+        now_t = datetime.now().time()
+        if start <= end:
+            return start <= now_t <= end
+        # Cross-midnight window, e.g. 22:00 -> 06:00.
+        return now_t >= start or now_t <= end
+
     def _run_loop(self) -> None:
         next_sync = time.monotonic()
         next_export = time.monotonic()
+        sync_window_logged = False
+        export_window_logged = False
 
         while not self._stop_event.is_set():
             now = time.monotonic()
             config = self._config
 
             if config.enable_sync_job and now >= next_sync:
-                self._run_job("Import Pachete Saga", self.service.run_sync_once)
+                if self._is_within_window(config.sync_window_start, config.sync_window_end):
+                    self._run_job("Import Pachete Saga", self.service.run_sync_once)
+                    sync_window_logged = False
+                elif not sync_window_logged:
+                    self.log(
+                        "Import Pachete Saga skipped: outside schedule window "
+                        f"({config.sync_window_start or '--:--'} - {config.sync_window_end or '--:--'})."
+                    )
+                    sync_window_logged = True
                 next_sync = now + max(5, config.sync_interval_seconds)
 
             if config.enable_export_job and now >= next_export:
-                self._run_job("export", self.service.run_export_once)
+                if self._is_within_window(config.export_window_start, config.export_window_end):
+                    self._run_job("export", self.service.run_export_once)
+                    export_window_logged = False
+                elif not export_window_logged:
+                    self.log(
+                        "Export skipped: outside schedule window "
+                        f"({config.export_window_start or '--:--'} - {config.export_window_end or '--:--'})."
+                    )
+                    export_window_logged = True
                 next_export = now + max(10, config.export_interval_seconds)
 
             self._stop_event.wait(1)
@@ -1460,6 +1527,8 @@ class DesktopApp(tk.Tk):
         self.config_path = config_path
         self.config_data = load_config(config_path)
         self.log_queue: queue.Queue[str] = queue.Queue()
+        self._is_quitting = False
+        self._tray_icon: Any | None = None
 
         self.service = IntegrationService(self._enqueue_log)
         self.scheduler = SchedulerEngine(self.service, self._enqueue_log)
@@ -1469,9 +1538,12 @@ class DesktopApp(tk.Tk):
         self._load_form(self.config_data)
         self._set_button_states()
         self._enqueue_log("Application initialized.")
+        self._init_tray_icon()
 
         self.after(200, self._flush_log_queue)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        if self.config_data.start_in_tray and self._tray_icon is not None:
+            self.after(300, self._hide_to_tray_on_startup)
 
     def _build_variables(self) -> None:
         self.var_db_path = tk.StringVar()
@@ -1481,6 +1553,7 @@ class DesktopApp(tk.Tk):
         self.var_db_password = tk.StringVar()
         self.var_db_charset = tk.StringVar()
         self.var_fb_client_library = tk.StringVar()
+        self.var_start_in_tray = tk.BooleanVar()
 
         self.var_sync_enabled = tk.BooleanVar()
         self.var_pachet_import_api_url = tk.StringVar()
@@ -1491,9 +1564,13 @@ class DesktopApp(tk.Tk):
         self.var_pachet_import_headers_json = tk.StringVar()
         self.var_pachet_import_user_agent = tk.StringVar()
         self.var_sync_interval = tk.StringVar()
+        self.var_sync_window_start = tk.StringVar()
+        self.var_sync_window_end = tk.StringVar()
 
         self.var_export_enabled = tk.BooleanVar()
         self.var_export_interval = tk.StringVar()
+        self.var_export_window_start = tk.StringVar()
+        self.var_export_window_end = tk.StringVar()
         self.var_upload_url = tk.StringVar()
         self.var_upload_field_name = tk.StringVar()
         self.var_upload_api_token = tk.StringVar()
@@ -1613,13 +1690,25 @@ class DesktopApp(tk.Tk):
             pady=4,
         )
 
+        ttk.Checkbutton(
+            frame,
+            text="Start minimized in system tray (near clock)",
+            variable=self.var_start_in_tray,
+        ).grid(
+            row=7,
+            column=0,
+            columnspan=3,
+            sticky="w",
+            pady=(10, 0),
+        )
+
         note = (
             "Tip: leave Host empty for direct file connection (embedded). "
             "Set Host + Port only when you want server mode. "
             "If you get client library errors, select fbclient.dll."
         )
         ttk.Label(frame, text=note, wraplength=780, foreground="#4B5563").grid(
-            row=7,
+            row=8,
             column=0,
             columnspan=3,
             sticky="w",
@@ -1664,6 +1753,18 @@ class DesktopApp(tk.Tk):
             self.var_pachet_status_update_id_query_param,
         )
         self._add_entry_row(frame, 8, "Import interval (seconds)", self.var_sync_interval)
+        self._add_entry_row(
+            frame,
+            9,
+            "Import schedule start (HH:MM, optional)",
+            self.var_sync_window_start,
+        )
+        self._add_entry_row(
+            frame,
+            10,
+            "Import schedule end (HH:MM, optional)",
+            self.var_sync_window_end,
+        )
 
         payload_help = (
             "Expected payload:\n"
@@ -1671,7 +1772,7 @@ class DesktopApp(tk.Tk):
             "or {\"pachete\": [ ... ]}."
         )
         ttk.Label(frame, text=payload_help, wraplength=780, foreground="#4B5563").grid(
-            row=9,
+            row=11,
             column=0,
             columnspan=2,
             sticky="w",
@@ -1689,42 +1790,54 @@ class DesktopApp(tk.Tk):
             pady=(0, 10),
         )
         self._add_entry_row(frame, 1, "Export interval (seconds)", self.var_export_interval)
-        self._add_entry_row(frame, 2, "Upload URL (PHP endpoint)", self.var_upload_url)
-        self._add_entry_row(frame, 3, "Upload file field name", self.var_upload_field_name)
-        self._add_entry_row(frame, 4, "Upload API token (optional)", self.var_upload_api_token)
         self._add_entry_row(
             frame,
-            5,
+            2,
+            "Export schedule start (HH:MM, optional)",
+            self.var_export_window_start,
+        )
+        self._add_entry_row(
+            frame,
+            3,
+            "Export schedule end (HH:MM, optional)",
+            self.var_export_window_end,
+        )
+        self._add_entry_row(frame, 4, "Upload URL (PHP endpoint)", self.var_upload_url)
+        self._add_entry_row(frame, 5, "Upload file field name", self.var_upload_field_name)
+        self._add_entry_row(frame, 6, "Upload API token (optional)", self.var_upload_api_token)
+        self._add_entry_row(
+            frame,
+            7,
             "Upload token query param (optional, ex: token)",
             self.var_upload_token_query_param,
         )
         self._add_entry_row(
             frame,
-            6,
+            8,
             "Upload headers JSON (optional)",
             self.var_upload_headers_json,
         )
-        self._add_entry_row(frame, 7, "Upload User-Agent", self.var_upload_user_agent)
+        self._add_entry_row(frame, 9, "Upload User-Agent", self.var_upload_user_agent)
 
-        ttk.Label(frame, text="CSV directory").grid(row=8, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="CSV directory").grid(row=10, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=self.var_csv_directory, width=78).grid(
-            row=8,
+            row=10,
             column=1,
             sticky="ew",
             pady=4,
         )
         ttk.Button(frame, text="Browse...", command=self._browse_csv_folder).grid(
-            row=8,
+            row=10,
             column=2,
             sticky="ew",
             padx=(6, 0),
             pady=4,
         )
 
-        self._add_entry_row(frame, 9, "Audit log directory", self.var_audit_log_directory)
-        self._add_entry_row(frame, 10, "HTTP timeout (seconds)", self.var_http_timeout)
+        self._add_entry_row(frame, 11, "Audit log directory", self.var_audit_log_directory)
+        self._add_entry_row(frame, 12, "HTTP timeout (seconds)", self.var_http_timeout)
         ttk.Checkbutton(frame, text="Verify SSL certificate", variable=self.var_verify_ssl).grid(
-            row=11,
+            row=13,
             column=0,
             columnspan=2,
             sticky="w",
@@ -1732,21 +1845,96 @@ class DesktopApp(tk.Tk):
         )
         self._add_entry_row(
             frame,
-            12,
+            14,
             "Extra upload fields JSON (optional)",
             self.var_extra_upload_fields,
         )
 
-        ttk.Label(frame, text="Stock SELECT SQL").grid(row=13, column=0, sticky="nw", pady=(10, 4))
+        ttk.Label(frame, text="Stock SELECT SQL").grid(row=15, column=0, sticky="nw", pady=(10, 4))
         self.txt_stock_sql = tk.Text(frame, height=10, wrap="word")
-        self.txt_stock_sql.grid(row=13, column=1, sticky="nsew", pady=(10, 4))
-        frame.rowconfigure(13, weight=1)
+        self.txt_stock_sql.grid(row=15, column=1, sticky="nsew", pady=(10, 4))
+        frame.rowconfigure(15, weight=1)
 
     def _build_logs_tab(self, frame: ttk.Frame) -> None:
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(0, weight=1)
-        self.txt_logs = tk.Text(frame, wrap="word", state="disabled")
+        frame.rowconfigure(1, weight=1)
+
+        toolbar = ttk.Frame(frame)
+        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Button(toolbar, text="Clear logs", command=self._clear_logs).pack(side="left")
+        ttk.Button(toolbar, text="Copy selected", command=self._copy_selected_logs).pack(
+            side="left",
+            padx=(8, 0),
+        )
+        ttk.Button(toolbar, text="Save logs...", command=self._save_logs_to_file).pack(
+            side="left",
+            padx=(8, 0),
+        )
+
+        logs_container = ttk.Frame(frame)
+        logs_container.grid(row=1, column=0, sticky="nsew")
+        logs_container.columnconfigure(0, weight=1)
+        logs_container.rowconfigure(0, weight=1)
+
+        self.txt_logs = tk.Text(
+            logs_container,
+            wrap="none",
+            state="disabled",
+            background="#0f172a",
+            foreground="#e2e8f0",
+            insertbackground="#e2e8f0",
+            font=("Consolas", 10),
+        )
         self.txt_logs.grid(row=0, column=0, sticky="nsew")
+        scroll_y = ttk.Scrollbar(logs_container, orient="vertical", command=self.txt_logs.yview)
+        scroll_y.grid(row=0, column=1, sticky="ns")
+        scroll_x = ttk.Scrollbar(logs_container, orient="horizontal", command=self.txt_logs.xview)
+        scroll_x.grid(row=1, column=0, sticky="ew")
+        self.txt_logs.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+
+        self.txt_logs.tag_configure("timestamp", foreground="#94a3b8")
+        self.txt_logs.tag_configure("info", foreground="#e2e8f0")
+        self.txt_logs.tag_configure("success", foreground="#22c55e")
+        self.txt_logs.tag_configure("warning", foreground="#f59e0b")
+        self.txt_logs.tag_configure("error", foreground="#ef4444")
+
+    def _clear_logs(self) -> None:
+        self.txt_logs.configure(state="normal")
+        self.txt_logs.delete("1.0", "end")
+        self.txt_logs.configure(state="disabled")
+        self._enqueue_log("Logs cleared.")
+
+    def _copy_selected_logs(self) -> None:
+        try:
+            selected = self.txt_logs.get("sel.first", "sel.last")
+        except tk.TclError:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(selected)
+        self._enqueue_log("Selected logs copied to clipboard.")
+
+    def _save_logs_to_file(self) -> None:
+        target = filedialog.asksaveasfilename(
+            title="Save logs",
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+        )
+        if not target:
+            return
+        content = self.txt_logs.get("1.0", "end").rstrip()
+        Path(target).write_text(content + "\n", encoding="utf-8")
+        self._enqueue_log(f"Logs exported to {Path(target).resolve()}.")
+
+    @staticmethod
+    def _log_tag_for_message(text: str) -> str:
+        lowered = text.lower()
+        if "error" in lowered or "failed" in lowered or "exception" in lowered:
+            return "error"
+        if "warning" in lowered:
+            return "warning"
+        if "success" in lowered or "completed" in lowered or "finished" in lowered:
+            return "success"
+        return "info"
 
     def _browse_db_file(self) -> None:
         selected = filedialog.askopenfilename(
@@ -1777,6 +1965,7 @@ class DesktopApp(tk.Tk):
         self.var_db_password.set(config.db_password)
         self.var_db_charset.set(config.db_charset)
         self.var_fb_client_library.set(config.fb_client_library_path)
+        self.var_start_in_tray.set(config.start_in_tray)
 
         self.var_sync_enabled.set(config.enable_sync_job)
         self.var_pachet_import_api_url.set(config.pachet_import_api_url)
@@ -1787,9 +1976,13 @@ class DesktopApp(tk.Tk):
         self.var_pachet_import_headers_json.set(config.pachet_import_headers_json)
         self.var_pachet_import_user_agent.set(config.pachet_import_user_agent)
         self.var_sync_interval.set(str(config.sync_interval_seconds))
+        self.var_sync_window_start.set(config.sync_window_start)
+        self.var_sync_window_end.set(config.sync_window_end)
 
         self.var_export_enabled.set(config.enable_export_job)
         self.var_export_interval.set(str(config.export_interval_seconds))
+        self.var_export_window_start.set(config.export_window_start)
+        self.var_export_window_end.set(config.export_window_end)
         self.var_upload_url.set(config.upload_url)
         self.var_upload_field_name.set(config.upload_field_name)
         self.var_upload_api_token.set(config.upload_api_token)
@@ -1822,8 +2015,11 @@ class DesktopApp(tk.Tk):
             db_password=self.var_db_password.get(),
             db_charset=self.var_db_charset.get().strip() or "UTF8",
             fb_client_library_path=self.var_fb_client_library.get().strip(),
+            start_in_tray=self.var_start_in_tray.get(),
             enable_sync_job=self.var_sync_enabled.get(),
             sync_interval_seconds=sync_interval,
+            sync_window_start=self.var_sync_window_start.get().strip(),
+            sync_window_end=self.var_sync_window_end.get().strip(),
             pachet_import_api_url=self.var_pachet_import_api_url.get().strip(),
             sync_api_token=self.var_sync_api_token.get().strip(),
             pachet_status_update_api_url=self.var_pachet_status_update_api_url.get().strip(),
@@ -1834,6 +2030,8 @@ class DesktopApp(tk.Tk):
             or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0",
             enable_export_job=self.var_export_enabled.get(),
             export_interval_seconds=export_interval,
+            export_window_start=self.var_export_window_start.get().strip(),
+            export_window_end=self.var_export_window_end.get().strip(),
             stock_select_sql=stock_sql,
             upload_url=self.var_upload_url.get().strip(),
             upload_field_name=upload_field,
@@ -1872,6 +2070,26 @@ class DesktopApp(tk.Tk):
             raise ValueError("Stock SELECT SQL is required when export job is enabled.")
         if config.enable_export_job and not config.upload_url:
             raise ValueError("Upload URL is required when export job is enabled.")
+        self._validate_schedule_window(
+            "Import schedule window",
+            config.sync_window_start,
+            config.sync_window_end,
+        )
+        self._validate_schedule_window(
+            "Export schedule window",
+            config.export_window_start,
+            config.export_window_end,
+        )
+
+    @staticmethod
+    def _validate_schedule_window(label: str, start_text: str, end_text: str) -> None:
+        has_start = bool(start_text.strip())
+        has_end = bool(end_text.strip())
+        if has_start != has_end:
+            raise ValueError(f"{label}: set both start and end values or leave both empty.")
+        if has_start and has_end:
+            parse_hhmm(start_text, f"{label} start")
+            parse_hhmm(end_text, f"{label} end")
 
     def _on_save(self) -> None:
         try:
@@ -1936,6 +2154,82 @@ class DesktopApp(tk.Tk):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.log_queue.put(f"{timestamp} | {message}")
 
+    def _init_tray_icon(self) -> None:
+        if pystray is None or Image is None or ImageDraw is None:
+            self._enqueue_log(f"System tray unavailable: {TRAY_IMPORT_ERROR}")
+            return
+        try:
+            tray_image = self._create_tray_image()
+            tray_menu = pystray.Menu(
+                pystray.MenuItem("Open settings", self._tray_open, default=True),
+                pystray.MenuItem("Run import now", self._tray_run_import),
+                pystray.MenuItem("Run export now", self._tray_run_export),
+                pystray.MenuItem("Exit", self._tray_exit),
+            )
+            self._tray_icon = pystray.Icon(
+                "desktop_stock_erp",
+                tray_image,
+                "Desktop Stock ERP Integration",
+                tray_menu,
+            )
+            self._tray_icon.run_detached()
+            self._enqueue_log("System tray icon initialized.")
+        except Exception as exc:  # pylint: disable=broad-except
+            self._tray_icon = None
+            self._enqueue_log(f"Warning: could not initialize system tray icon: {exc}")
+
+    @staticmethod
+    def _create_tray_image() -> Any:
+        image = Image.new("RGB", (64, 64), "#0f172a")
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle((8, 8, 56, 56), radius=10, fill="#1d4ed8")
+        draw.rectangle((18, 22, 46, 26), fill="#e2e8f0")
+        draw.rectangle((18, 30, 46, 34), fill="#e2e8f0")
+        draw.rectangle((18, 38, 38, 42), fill="#e2e8f0")
+        return image
+
+    def _show_from_tray(self) -> None:
+        self.deiconify()
+        self.lift()
+        try:
+            self.focus_force()
+        except tk.TclError:
+            pass
+
+    def _hide_to_tray_on_startup(self) -> None:
+        self.withdraw()
+        self._enqueue_log("Application started minimized in system tray.")
+
+    def _hide_to_tray(self) -> None:
+        self.withdraw()
+        self._enqueue_log("Application minimized to system tray.")
+
+    def _tray_open(self, icon: Any = None, item: Any = None) -> None:
+        del icon, item
+        self.after(0, self._show_from_tray)
+
+    def _tray_run_import(self, icon: Any = None, item: Any = None) -> None:
+        del icon, item
+        self.after(0, self._run_sync_now)
+
+    def _tray_run_export(self, icon: Any = None, item: Any = None) -> None:
+        del icon, item
+        self.after(0, self._run_export_now)
+
+    def _tray_exit(self, icon: Any = None, item: Any = None) -> None:
+        del icon, item
+        self.after(0, self._shutdown_app)
+
+    def _stop_tray_icon(self) -> None:
+        icon = self._tray_icon
+        self._tray_icon = None
+        if icon is None:
+            return
+        try:
+            icon.stop()
+        except Exception:  # pragma: no cover - best effort shutdown
+            pass
+
     def _flush_log_queue(self) -> None:
         has_messages = False
         while True:
@@ -1945,16 +2239,33 @@ class DesktopApp(tk.Tk):
                 break
             has_messages = True
             self.txt_logs.configure(state="normal")
-            self.txt_logs.insert("end", f"{message}\n")
+            timestamp_part = ""
+            message_part = message
+            if " | " in message:
+                timestamp_part, message_part = message.split(" | ", 1)
+            tag = self._log_tag_for_message(message_part)
+            if timestamp_part:
+                self.txt_logs.insert("end", f"{timestamp_part} | ", ("timestamp",))
+            self.txt_logs.insert("end", f"{message_part}\n", (tag,))
             self.txt_logs.configure(state="disabled")
             self.txt_logs.see("end")
         if has_messages:
             self._set_button_states()
         self.after(200, self._flush_log_queue)
 
-    def _on_close(self) -> None:
+    def _shutdown_app(self) -> None:
+        if self._is_quitting:
+            return
+        self._is_quitting = True
         self.scheduler.stop()
+        self._stop_tray_icon()
         self.destroy()
+
+    def _on_close(self) -> None:
+        if self._tray_icon is not None and not self._is_quitting:
+            self._hide_to_tray()
+            return
+        self._shutdown_app()
 
 
 def main() -> None:
