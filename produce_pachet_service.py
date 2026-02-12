@@ -108,6 +108,10 @@ FROM RDB$RELATION_FIELDS
 WHERE TRIM(RDB$RELATION_NAME) = ?
   AND TRIM(RDB$FIELD_NAME) = ?
 """.strip(),
+    "select_maxid_function": """
+SELECT COALESCE(MAXID(), 0)
+FROM RDB$DATABASE
+""".strip(),
     "select_max_miscari_id_u": """
 SELECT COALESCE(MAX(ID_U), 0)
 FROM MISCARI
@@ -216,6 +220,20 @@ INSERT INTO MISCARI (
     PRET
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 """.strip(),
+    "insert_miscari_produs_bp_with_pret_and_id_u_and_cant_nesti": """
+INSERT INTO MISCARI (
+    ID,
+    ID_U,
+    DATA,
+    NR_DOC,
+    TIP_DOC,
+    COD_ART,
+    CANTITATE,
+    CANT_NESTI,
+    GESTIUNE,
+    PRET
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+""".strip(),
     "insert_miscari_produs_bp_without_pret": """
 INSERT INTO MISCARI (
     ID,
@@ -227,6 +245,19 @@ INSERT INTO MISCARI (
     GESTIUNE
 ) VALUES (?, ?, ?, ?, ?, ?, ?)
 """.strip(),
+    "insert_miscari_produs_bp_with_pret_and_cant_nesti": """
+INSERT INTO MISCARI (
+    ID,
+    DATA,
+    NR_DOC,
+    TIP_DOC,
+    COD_ART,
+    CANTITATE,
+    CANT_NESTI,
+    GESTIUNE,
+    PRET
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+""".strip(),
     "insert_miscari_produs_bp_without_pret_and_id_u": """
 INSERT INTO MISCARI (
     ID,
@@ -236,6 +267,31 @@ INSERT INTO MISCARI (
     TIP_DOC,
     COD_ART,
     CANTITATE,
+    GESTIUNE
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+""".strip(),
+    "insert_miscari_produs_bp_without_pret_and_id_u_with_cant_nesti": """
+INSERT INTO MISCARI (
+    ID,
+    ID_U,
+    DATA,
+    NR_DOC,
+    TIP_DOC,
+    COD_ART,
+    CANTITATE,
+    CANT_NESTI,
+    GESTIUNE
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+""".strip(),
+    "insert_miscari_produs_bp_without_pret_with_cant_nesti": """
+INSERT INTO MISCARI (
+    ID,
+    DATA,
+    NR_DOC,
+    TIP_DOC,
+    COD_ART,
+    CANTITATE,
+    CANT_NESTI,
     GESTIUNE
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 """.strip(),
@@ -684,9 +740,19 @@ def _miscari_has_suma_desc_column(cursor: Any) -> bool:
     return int(cursor.fetchone()[0] or 0) > 0
 
 
+def _miscari_has_cant_nesti_column(cursor: Any) -> bool:
+    cursor.execute(SQL_QUERIES["check_miscari_has_pret_column"], ["MISCARI", "CANT_NESTI"])
+    return int(cursor.fetchone()[0] or 0) > 0
+
+
 def _articole_has_stoc_column(cursor: Any) -> bool:
     cursor.execute(SQL_QUERIES["check_miscari_has_pret_column"], ["ARTICOLE", "STOC"])
     return int(cursor.fetchone()[0] or 0) > 0
+
+
+def _get_maxid_value(cursor: Any) -> int:
+    cursor.execute(SQL_QUERIES["select_maxid_function"])
+    return int(cursor.fetchone()[0] or 0)
 
 
 def _get_next_miscari_id_u(cursor: Any) -> int:
@@ -1313,14 +1379,18 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
     miscari_has_pret = _miscari_has_pret_column(cursor)
     miscari_has_id_u = _miscari_has_id_u_column(cursor)
     miscari_has_suma_desc = _miscari_has_suma_desc_column(cursor)
+    miscari_has_cant_nesti = _miscari_has_cant_nesti_column(cursor)
+    maxid_value = _get_maxid_value(cursor)
+    miscari_doc_id = int(maxid_value) + 1
     if miscari_has_id_u:
-        # Requested rule: MISCARI.ID starts from MAX(MISCARI.ID_U) + 1.
-        next_id_u = _get_next_miscari_id_u(cursor)
-        miscari_doc_id = int(next_id_u)
+        # Requested rule:
+        # - MISCARI.ID = MAXID() + 1
+        # - first BC ID_U = MAXID() + 2
+        next_id_u = miscari_doc_id + 1
+        id_u_start = miscari_doc_id
     else:
         next_id_u = None
-        miscari_doc_id = _get_next_miscari_id(cursor)
-    id_u_start = next_id_u if next_id_u is not None else None
+        id_u_start = None
     bon_det_insertable_fields = _get_bon_det_insertable_fields(cursor, bon_table_name)
     bon_det_has_id_u_column = any(
         field["name"].upper() == "ID_U" for field in bon_det_insertable_fields
@@ -1329,80 +1399,21 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         field["name"].upper() == "PK" for field in bon_det_insertable_fields
     )
     next_bon_det_id_u = (
-        _get_next_bon_det_id_u(cursor, bon_table_name) if bon_det_has_id_u_column else None
+        _get_next_bon_det_id_u(cursor, bon_table_name)
+        if bon_det_has_id_u_column and not miscari_has_id_u
+        else None
     )
     next_bon_det_pk = (
         _get_next_bon_table_pk(cursor, bon_table_name) if bon_det_has_pk_column else None
     )
-    bon_det_id_u_start = next_bon_det_id_u if next_bon_det_id_u is not None else None
+    bon_det_id_u_start: int | None = None
     bon_det_id_u_end: int | None = None
     bon_det_inserted = 0
     bon_det_articol_cache: dict[str, tuple[str, str]] = {}
 
     qty_produs = abs(pachet.cantitate_produsa)
     qty_bp = -qty_produs if is_storno else qty_produs
-    # Business order requested: BP row first, then BC rows.
-    if miscari_has_pret and miscari_has_id_u:
-        current_id_u = int(next_id_u)
-        next_id_u = current_id_u + 1
-        cursor.execute(
-            SQL_QUERIES["insert_miscari_produs_bp_with_pret_and_id_u"],
-            [
-                miscari_doc_id,
-                current_id_u,
-                pachet.data,
-                nr_doc,
-                "BP",
-                cod_pachet_db,
-                qty_bp,
-                pachet.gestiune,
-                pachet.pret_vanz,
-            ],
-        )
-    elif miscari_has_pret:
-        cursor.execute(
-            SQL_QUERIES["insert_miscari_produs_bp_with_pret"],
-            [
-                miscari_doc_id,
-                pachet.data,
-                nr_doc,
-                "BP",
-                cod_pachet_db,
-                qty_bp,
-                pachet.gestiune,
-                pachet.pret_vanz,
-            ],
-        )
-    elif miscari_has_id_u:
-        current_id_u = int(next_id_u)
-        next_id_u = current_id_u + 1
-        cursor.execute(
-            SQL_QUERIES["insert_miscari_produs_bp_without_pret_and_id_u"],
-            [
-                miscari_doc_id,
-                current_id_u,
-                pachet.data,
-                nr_doc,
-                "BP",
-                cod_pachet_db,
-                qty_bp,
-                pachet.gestiune,
-            ],
-        )
-    else:
-        cursor.execute(
-            SQL_QUERIES["insert_miscari_produs_bp_without_pret"],
-            [
-                miscari_doc_id,
-                pachet.data,
-                nr_doc,
-                "BP",
-                cod_pachet_db,
-                qty_bp,
-                pachet.gestiune,
-            ],
-        )
-
+    # Business order requested: BC rows first, then BP row.
     for line_no, produs in enumerate(request.produse, start=1):
         qty_consum = abs(produs.cantitate) if is_storno else -abs(produs.cantitate)
         # Requested rule for MISCARI.BC:
@@ -1411,6 +1422,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         #   normal BC qty < 0  => SUMA_DESC > 0
         #   storno BC qty > 0  => SUMA_DESC < 0
         bc_total_value = -abs(produs.val_produse) if is_storno else abs(produs.val_produse)
+        current_id_u: int | None = None
         if miscari_has_id_u and miscari_has_suma_desc:
             current_id_u = int(next_id_u)
             next_id_u = current_id_u + 1
@@ -1472,10 +1484,19 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                 ],
             )
 
-        current_bon_det_id_u = int(next_bon_det_id_u) if next_bon_det_id_u is not None else None
-        if next_bon_det_id_u is not None:
-            next_bon_det_id_u = current_bon_det_id_u + 1
-            bon_det_id_u_end = current_bon_det_id_u
+        current_bon_det_id_u: int | None = None
+        if bon_det_has_id_u_column:
+            if miscari_has_id_u and current_id_u is not None:
+                # Requested rule: BON_DET/BON_PRED ID_U must match BC ID_U.
+                current_bon_det_id_u = current_id_u
+            elif next_bon_det_id_u is not None:
+                current_bon_det_id_u = int(next_bon_det_id_u)
+                next_bon_det_id_u = current_bon_det_id_u + 1
+            if current_bon_det_id_u is not None:
+                if bon_det_id_u_start is None:
+                    bon_det_id_u_start = current_bon_det_id_u
+                bon_det_id_u_end = current_bon_det_id_u
+
         current_bon_det_pk = int(next_bon_det_pk) if next_bon_det_pk is not None else None
         if next_bon_det_pk is not None:
             next_bon_det_pk = current_bon_det_pk + 1
@@ -1494,6 +1515,124 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
             articol_cache=bon_det_articol_cache,
         )
         bon_det_inserted += 1
+
+    bp_id_u_value = miscari_doc_id if miscari_has_id_u else None
+    if miscari_has_pret and miscari_has_id_u and miscari_has_cant_nesti:
+        cursor.execute(
+            SQL_QUERIES["insert_miscari_produs_bp_with_pret_and_id_u_and_cant_nesti"],
+            [
+                miscari_doc_id,
+                bp_id_u_value,
+                pachet.data,
+                nr_doc,
+                "BP",
+                cod_pachet_db,
+                qty_bp,
+                qty_bp,
+                pachet.gestiune,
+                pachet.pret_vanz,
+            ],
+        )
+    elif miscari_has_pret and miscari_has_id_u:
+        cursor.execute(
+            SQL_QUERIES["insert_miscari_produs_bp_with_pret_and_id_u"],
+            [
+                miscari_doc_id,
+                bp_id_u_value,
+                pachet.data,
+                nr_doc,
+                "BP",
+                cod_pachet_db,
+                qty_bp,
+                pachet.gestiune,
+                pachet.pret_vanz,
+            ],
+        )
+    elif miscari_has_pret and miscari_has_cant_nesti:
+        cursor.execute(
+            SQL_QUERIES["insert_miscari_produs_bp_with_pret_and_cant_nesti"],
+            [
+                miscari_doc_id,
+                pachet.data,
+                nr_doc,
+                "BP",
+                cod_pachet_db,
+                qty_bp,
+                qty_bp,
+                pachet.gestiune,
+                pachet.pret_vanz,
+            ],
+        )
+    elif miscari_has_pret:
+        cursor.execute(
+            SQL_QUERIES["insert_miscari_produs_bp_with_pret"],
+            [
+                miscari_doc_id,
+                pachet.data,
+                nr_doc,
+                "BP",
+                cod_pachet_db,
+                qty_bp,
+                pachet.gestiune,
+                pachet.pret_vanz,
+            ],
+        )
+    elif miscari_has_id_u and miscari_has_cant_nesti:
+        cursor.execute(
+            SQL_QUERIES["insert_miscari_produs_bp_without_pret_and_id_u_with_cant_nesti"],
+            [
+                miscari_doc_id,
+                bp_id_u_value,
+                pachet.data,
+                nr_doc,
+                "BP",
+                cod_pachet_db,
+                qty_bp,
+                qty_bp,
+                pachet.gestiune,
+            ],
+        )
+    elif miscari_has_id_u:
+        cursor.execute(
+            SQL_QUERIES["insert_miscari_produs_bp_without_pret_and_id_u"],
+            [
+                miscari_doc_id,
+                bp_id_u_value,
+                pachet.data,
+                nr_doc,
+                "BP",
+                cod_pachet_db,
+                qty_bp,
+                pachet.gestiune,
+            ],
+        )
+    elif miscari_has_cant_nesti:
+        cursor.execute(
+            SQL_QUERIES["insert_miscari_produs_bp_without_pret_with_cant_nesti"],
+            [
+                miscari_doc_id,
+                pachet.data,
+                nr_doc,
+                "BP",
+                cod_pachet_db,
+                qty_bp,
+                qty_bp,
+                pachet.gestiune,
+            ],
+        )
+    else:
+        cursor.execute(
+            SQL_QUERIES["insert_miscari_produs_bp_without_pret"],
+            [
+                miscari_doc_id,
+                pachet.data,
+                nr_doc,
+                "BP",
+                cod_pachet_db,
+                qty_bp,
+                pachet.gestiune,
+            ],
+        )
 
     pred_det_inserted = _insert_pred_det_rows(
         cursor=cursor,
