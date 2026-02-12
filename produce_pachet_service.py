@@ -109,7 +109,7 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
   AND TRIM(RDB$FIELD_NAME) = ?
 """.strip(),
     "select_maxid_function": """
-SELECT COALESCE(MAXID(), 0)
+SELECT MAXID() AS VALUE_MAXID
 FROM RDB$DATABASE
 """.strip(),
     "select_max_miscari_id_u": """
@@ -752,7 +752,18 @@ def _articole_has_stoc_column(cursor: Any) -> bool:
 
 def _get_maxid_value(cursor: Any) -> int:
     cursor.execute(SQL_QUERIES["select_maxid_function"])
-    return int(cursor.fetchone()[0] or 0)
+    row = cursor.fetchone()
+    if not row:
+        return 0
+    return int(row[0] or 0)
+
+
+def _get_miscari_high_watermark(cursor: Any) -> int:
+    cursor.execute(SQL_QUERIES["select_max_miscari_id"])
+    max_id = int(cursor.fetchone()[0] or 0)
+    cursor.execute(SQL_QUERIES["select_max_miscari_id_u"])
+    max_id_u = int(cursor.fetchone()[0] or 0)
+    return max(max_id, max_id_u)
 
 
 def _get_next_miscari_id_u(cursor: Any) -> int:
@@ -1362,6 +1373,8 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
             "nrDoc": nr_doc_existing,
             "idDoc": pachet.id_doc,
             "miscariId": miscari_id_existing,
+            "maxIdValue": None,
+            "miscariBaseValue": None,
             "bonDetInserted": bon_det_inserted,
             "bonTable": bon_table_name,
             "predDetInserted": 0,
@@ -1381,10 +1394,12 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
     miscari_has_suma_desc = _miscari_has_suma_desc_column(cursor)
     miscari_has_cant_nesti = _miscari_has_cant_nesti_column(cursor)
     maxid_value = _get_maxid_value(cursor)
-    miscari_doc_id = int(maxid_value) + 1
+    miscari_high_watermark = _get_miscari_high_watermark(cursor)
+    miscari_base_value = max(int(maxid_value), int(miscari_high_watermark))
+    miscari_doc_id = miscari_base_value + 1
     if miscari_has_id_u:
         # Requested rule:
-        # - MISCARI.ID = MAXID() + 1
+        # - MISCARI.ID = MAXID() + 1 (guarded so we never go below existing maxima)
         # - first BC ID_U = MAXID() + 2
         next_id_u = miscari_doc_id + 1
         id_u_start = miscari_doc_id
@@ -1657,6 +1672,8 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         "nrDoc": nr_doc,
         "idDoc": pachet.id_doc,
         "miscariId": miscari_doc_id,
+        "maxIdValue": int(maxid_value),
+        "miscariBaseValue": int(miscari_base_value),
         "bonDetInserted": bon_det_inserted,
         "bonTable": bon_table_name,
         "predDetInserted": pred_det_inserted,

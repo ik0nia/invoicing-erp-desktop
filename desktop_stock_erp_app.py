@@ -977,6 +977,8 @@ WHERE {bon_det_where_sql}
                     f"#{index}: codPachet={result.get('codPachet')}, "
                     f"nrDoc={result.get('nrDoc')}, idDoc={result.get('idDoc')}, "
                     f"miscariId={result.get('miscariId')}, "
+                    f"maxIdValue={result.get('maxIdValue')}, "
+                    f"miscariBaseValue={result.get('miscariBaseValue')}, "
                     f"bonTable={result.get('bonTable')}, "
                     f"bonDetInserted={result.get('bonDetInserted')}, "
                     f"predDetInserted={result.get('predDetInserted')}, "
