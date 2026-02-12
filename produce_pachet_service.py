@@ -672,6 +672,12 @@ def _get_next_bon_det_id_u(cursor: Any, bon_table_name: str) -> int:
     return current_max + 1
 
 
+def _get_next_bon_table_pk(cursor: Any, bon_table_name: str) -> int:
+    cursor.execute(f"SELECT COALESCE(MAX(PK), 0) FROM {_quote_identifier(bon_table_name)}")
+    current_max = int(cursor.fetchone()[0] or 0)
+    return current_max + 1
+
+
 def _resolve_bon_consumption_table(cursor: Any) -> str:
     for table_name in _BON_CONSUMPTION_TABLE_CANDIDATES:
         fields = _get_relation_fields(cursor, table_name)
@@ -837,6 +843,7 @@ def _bon_det_field_value(
     nr_doc: int,
     line_no: int,
     bon_det_id_u: int | None,
+    bon_det_pk: int | None,
     qty_consum: Decimal,
     unit_price: Decimal,
     line_value: Decimal,
@@ -852,6 +859,7 @@ def _bon_det_field_value(
         "IDDOC": pachet.id_doc,
         "ID_U": bon_det_id_u,
         "IDU": bon_det_id_u,
+        "PK": bon_det_pk,
         "VALIDAT": "V",
         "DATA": pachet.data,
         "DATA_DOC": pachet.data,
@@ -945,6 +953,7 @@ def _insert_single_bon_det_row(
     nr_doc: int,
     line_no: int,
     bon_det_id_u: int | None,
+    bon_det_pk: int | None,
     is_storno: bool,
     articol_cache: dict[str, tuple[str, str]],
 ) -> None:
@@ -974,6 +983,7 @@ def _insert_single_bon_det_row(
             nr_doc=nr_doc,
             line_no=line_no,
             bon_det_id_u=bon_det_id_u,
+            bon_det_pk=bon_det_pk,
             qty_consum=qty_consum,
             unit_price=unit_price,
             line_value=line_value,
@@ -1014,7 +1024,9 @@ def _insert_bon_det_rows(
 ) -> dict[str, int | None]:
     insertable_fields = _get_bon_det_insertable_fields(cursor, bon_table_name)
     has_id_u_column = any(field["name"].upper() == "ID_U" for field in insertable_fields)
+    has_pk_column = any(field["name"].upper() == "PK" for field in insertable_fields)
     next_id_u = _get_next_bon_det_id_u(cursor, bon_table_name) if has_id_u_column else None
+    next_pk = _get_next_bon_table_pk(cursor, bon_table_name) if has_pk_column else None
     id_u_start = next_id_u if next_id_u is not None else None
     inserted_rows = 0
     pachet = request.pachet
@@ -1025,6 +1037,9 @@ def _insert_bon_det_rows(
         current_id_u = int(next_id_u) if next_id_u is not None else None
         if next_id_u is not None:
             next_id_u = current_id_u + 1
+        current_pk = int(next_pk) if next_pk is not None else None
+        if next_pk is not None:
+            next_pk = current_pk + 1
 
         _insert_single_bon_det_row(
             cursor=cursor,
@@ -1036,6 +1051,7 @@ def _insert_bon_det_rows(
             nr_doc=nr_doc,
             line_no=line_no,
             bon_det_id_u=current_id_u,
+            bon_det_pk=current_pk,
             is_storno=is_storno,
             articol_cache=articol_cache,
         )
@@ -1251,8 +1267,14 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
     bon_det_has_id_u_column = any(
         field["name"].upper() == "ID_U" for field in bon_det_insertable_fields
     )
+    bon_det_has_pk_column = any(
+        field["name"].upper() == "PK" for field in bon_det_insertable_fields
+    )
     next_bon_det_id_u = (
         _get_next_bon_det_id_u(cursor, bon_table_name) if bon_det_has_id_u_column else None
+    )
+    next_bon_det_pk = (
+        _get_next_bon_table_pk(cursor, bon_table_name) if bon_det_has_pk_column else None
     )
     bon_det_id_u_start = next_bon_det_id_u if next_bon_det_id_u is not None else None
     bon_det_id_u_end: int | None = None
@@ -1298,6 +1320,9 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         if next_bon_det_id_u is not None:
             next_bon_det_id_u = current_bon_det_id_u + 1
             bon_det_id_u_end = current_bon_det_id_u
+        current_bon_det_pk = int(next_bon_det_pk) if next_bon_det_pk is not None else None
+        if next_bon_det_pk is not None:
+            next_bon_det_pk = current_bon_det_pk + 1
         _insert_single_bon_det_row(
             cursor=cursor,
             bon_table_name=bon_table_name,
@@ -1308,6 +1333,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
             nr_doc=nr_doc,
             line_no=line_no,
             bon_det_id_u=current_bon_det_id_u,
+            bon_det_pk=current_bon_det_pk,
             is_storno=is_storno,
             articol_cache=bon_det_articol_cache,
         )
