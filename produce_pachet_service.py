@@ -1326,7 +1326,12 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
     # Business order requested: BC rows first, then BP row.
     for line_no, produs in enumerate(request.produse, start=1):
         qty_consum = abs(produs.cantitate) if is_storno else -abs(produs.cantitate)
-        bc_total_value = abs(produs.val_produse) if is_storno else -abs(produs.val_produse)
+        # Requested rule for MISCARI.BC:
+        # - keep quantity sign as-is
+        # - SUMA_DESC must use opposite sign
+        #   normal BC qty < 0  => SUMA_DESC > 0
+        #   storno BC qty > 0  => SUMA_DESC < 0
+        bc_total_value = -abs(produs.val_produse) if is_storno else abs(produs.val_produse)
         if miscari_has_id_u and miscari_has_suma_desc:
             current_id_u = int(next_id_u)
             next_id_u = current_id_u + 1
