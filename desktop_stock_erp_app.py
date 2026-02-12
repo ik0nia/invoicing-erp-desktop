@@ -46,6 +46,7 @@ else:
     PRODUCE_PACHET_IMPORT_ERROR = None
 
 CONFIG_PATH = Path("config.json")
+IMPORT_RUNTIME_TAG = "bon-consumption-trace-2026-02-12-01"
 
 
 def to_int(value: Any, default: int, minimum: int) -> int:
@@ -1015,6 +1016,7 @@ WHERE {bon_det_where_sql}
             self.log("Import Pachete Saga API URL is empty. Set it in Import Pachete Saga tab.")
             return
 
+        self.log(f"Import Pachete Saga runtime tag: {IMPORT_RUNTIME_TAG}")
         self.log("Import Pachete Saga job started.")
         pachete_processed = self._run_pachet_import_sync(config)
         self.log(f"Import Pachete Saga completed. Processed {pachete_processed} item(s).")
