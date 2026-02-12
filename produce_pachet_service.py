@@ -758,14 +758,6 @@ def _get_maxid_value(cursor: Any) -> int:
     return int(row[0] or 0)
 
 
-def _get_miscari_high_watermark(cursor: Any) -> int:
-    cursor.execute(SQL_QUERIES["select_max_miscari_id"])
-    max_id = int(cursor.fetchone()[0] or 0)
-    cursor.execute(SQL_QUERIES["select_max_miscari_id_u"])
-    max_id_u = int(cursor.fetchone()[0] or 0)
-    return max(max_id, max_id_u)
-
-
 def _get_next_miscari_id_u(cursor: Any) -> int:
     cursor.execute(SQL_QUERIES["select_max_miscari_id_u"])
     current_max = int(cursor.fetchone()[0] or 0)
@@ -1394,12 +1386,11 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
     miscari_has_suma_desc = _miscari_has_suma_desc_column(cursor)
     miscari_has_cant_nesti = _miscari_has_cant_nesti_column(cursor)
     maxid_value = _get_maxid_value(cursor)
-    miscari_high_watermark = _get_miscari_high_watermark(cursor)
-    miscari_base_value = max(int(maxid_value), int(miscari_high_watermark))
+    miscari_base_value = int(maxid_value)
     miscari_doc_id = miscari_base_value + 1
     if miscari_has_id_u:
         # Requested rule:
-        # - MISCARI.ID = MAXID() + 1 (guarded so we never go below existing maxima)
+        # - MISCARI.ID = MAXID() + 1
         # - first BC ID_U = MAXID() + 2
         next_id_u = miscari_doc_id + 1
         id_u_start = miscari_doc_id
