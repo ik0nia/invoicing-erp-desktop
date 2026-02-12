@@ -571,15 +571,10 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
                 where_parts = []
                 params: list[Any] = []
 
-                if "ID" in bon_det_columns:
-                    where_parts.append("ID = ?")
-                    params.append(miscari_id_value)
-                elif "ID_UNIC" in bon_det_columns:
-                    where_parts.append("ID_UNIC = ?")
-                    params.append(miscari_id_value)
-                elif "ID_DOC" in bon_det_columns:
-                    where_parts.append("ID_DOC = ?")
-                    params.append(id_doc_value)
+                has_nr_doc = "NR_DOC" in bon_det_columns
+                if has_nr_doc:
+                    where_parts.append("NR_DOC = ?")
+                    params.append(nr_doc_value)
 
                 if "DATA" in bon_det_columns:
                     where_parts.append("DATA = ?")
@@ -588,9 +583,25 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
                     where_parts.append("DATA_DOC = ?")
                     params.append(data_value)
 
-                if "NR_DOC" in bon_det_columns:
-                    where_parts.append("NR_DOC = ?")
-                    params.append(nr_doc_value)
+                if "TIP_DOC" in bon_det_columns:
+                    where_parts.append("TIP_DOC = ?")
+                    params.append("BC")
+                elif "TIPDOC" in bon_det_columns:
+                    where_parts.append("TIPDOC = ?")
+                    params.append("BC")
+
+                # Some BON_DET schemas use ID as line identity, not document key.
+                # Prefer NR_DOC/DATA for verification when available.
+                if not has_nr_doc:
+                    if "ID_DOC" in bon_det_columns:
+                        where_parts.append("ID_DOC = ?")
+                        params.append(id_doc_value)
+                    elif "ID_UNIC" in bon_det_columns:
+                        where_parts.append("ID_UNIC = ?")
+                        params.append(miscari_id_value)
+                    elif "ID" in bon_det_columns:
+                        where_parts.append("ID = ?")
+                        params.append(miscari_id_value)
 
                 if where_parts:
                     bon_det_checked = True
@@ -942,7 +953,8 @@ WHERE {bon_det_where_sql}
                     f"miscariId={result.get('miscariId')}, "
                     f"bonDetInserted={result.get('bonDetInserted')}, "
                     f"predDetInserted={result.get('predDetInserted')}, "
-                    f"alreadyImported={already_imported}"
+                    f"alreadyImported={already_imported}, "
+                    f"message={result.get('message')}"
                 )
             except Exception as exc:  # pylint: disable=broad-except
                 message = f"Import Pachete Saga: failed #{index}: {exc}"

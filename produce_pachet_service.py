@@ -646,10 +646,15 @@ def _trim_db_char(value: str) -> str:
     return str(value or "").rstrip()
 
 
+def _quote_identifier(identifier: str) -> str:
+    escaped = str(identifier).replace('"', '""')
+    return f'"{escaped}"'
+
+
 def _build_dynamic_insert_sql(table_name: str, columns: list[str]) -> str:
     placeholders = ", ".join(["?"] * len(columns))
-    column_list = ", ".join(columns)
-    return f"INSERT INTO {table_name} ({column_list}) VALUES ({placeholders})"
+    column_list = ", ".join(_quote_identifier(column) for column in columns)
+    return f"INSERT INTO {_quote_identifier(table_name)} ({column_list}) VALUES ({placeholders})"
 
 
 def _get_relation_fields(cursor: Any, relation_name: str) -> list[dict[str, Any]]:
@@ -795,15 +800,15 @@ def _bon_det_field_value(
         "NR_DOC": nr_doc,
         "TIP_DOC": "BC",
         "TIPDOC": "BC",
-        "GESTIUNE": "Gestiunea 1",
-        "GEST": "Gestiunea 1",
+        "GESTIUNE": pachet.gestiune,
+        "GEST": pachet.gestiune,
         "DEN_GEST": "Gestiunea 1",
         "DENGEST": "Gestiunea 1",
         "DENGESTIUNE": "Gestiunea 1",
-        "COD": produs.cod_articol_db,
-        "COD_ART": produs.cod_articol_db,
-        "CODART": produs.cod_articol_db,
-        "COD_ARTICOL": produs.cod_articol_db,
+        "COD": _trim_db_char(produs.cod_articol_db),
+        "COD_ART": _trim_db_char(produs.cod_articol_db),
+        "CODART": _trim_db_char(produs.cod_articol_db),
+        "COD_ARTICOL": _trim_db_char(produs.cod_articol_db),
         "DENUMIRE": produs_denumire,
         "DEN_ART": produs_denumire,
         "DENART": produs_denumire,
@@ -833,9 +838,9 @@ def _bon_det_field_value(
         return direct_values[upper]
 
     if "COD" in upper:
-        return produs.cod_articol_db
+        return _trim_db_char(produs.cod_articol_db)
     if "GEST" in upper:
-        return "Gestiunea 1"
+        return pachet.gestiune
     if ("DEN" in upper and "TIP" in upper) or "MATER" in upper:
         return "Materii prime"
     if upper in {"DENUMIRE_ARTICOL", "NUME_ARTICOL"}:
@@ -965,15 +970,10 @@ def _count_bon_det_rows_for_document(
     where_parts: list[str] = []
     params: list[Any] = []
 
-    if "ID" in bon_det_columns:
-        where_parts.append("ID = ?")
-        params.append(miscari_doc_id)
-    elif "ID_UNIC" in bon_det_columns:
-        where_parts.append("ID_UNIC = ?")
-        params.append(miscari_doc_id)
-    elif "ID_DOC" in bon_det_columns:
-        where_parts.append("ID_DOC = ?")
-        params.append(pachet.id_doc)
+    has_nr_doc = "NR_DOC" in bon_det_columns
+    if "NR_DOC" in bon_det_columns:
+        where_parts.append("NR_DOC = ?")
+        params.append(nr_doc)
 
     if "DATA" in bon_det_columns:
         where_parts.append("DATA = ?")
@@ -982,14 +982,30 @@ def _count_bon_det_rows_for_document(
         where_parts.append("DATA_DOC = ?")
         params.append(pachet.data)
 
-    if "NR_DOC" in bon_det_columns:
-        where_parts.append("NR_DOC = ?")
-        params.append(nr_doc)
+    if "TIP_DOC" in bon_det_columns:
+        where_parts.append("TIP_DOC = ?")
+        params.append("BC")
+    elif "TIPDOC" in bon_det_columns:
+        where_parts.append("TIPDOC = ?")
+        params.append("BC")
+
+    # Some schemas use BON_DET.ID as independent identity, not document ID.
+    # Prefer NR_DOC/DATA where available, and only fall back to ID-based keys if needed.
+    if not has_nr_doc:
+        if "ID_DOC" in bon_det_columns:
+            where_parts.append("ID_DOC = ?")
+            params.append(pachet.id_doc)
+        elif "ID_UNIC" in bon_det_columns:
+            where_parts.append("ID_UNIC = ?")
+            params.append(miscari_doc_id)
+        elif "ID" in bon_det_columns:
+            where_parts.append("ID = ?")
+            params.append(miscari_doc_id)
 
     if not where_parts:
         raise RuntimeError(
             "Cannot inspect BON_DET rows: no compatible key columns were found "
-            "(expected one of ID/ID_UNIC/ID_DOC plus DATA/NR_DOC where available)."
+            "(expected NR_DOC/DATA or one of ID_DOC/ID_UNIC/ID)."
         )
 
     where_sql = " AND ".join(where_parts)
