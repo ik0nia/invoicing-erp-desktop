@@ -824,14 +824,46 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
 
     qty_produs = abs(pachet.cantitate_produsa)
     qty_bp = -qty_produs if is_storno else qty_produs
-    # Business order requested: BP first, then BC rows.
+    # Business order requested: BC rows first, then BP row.
+    for produs in request.produse:
+        qty_consum = abs(produs.cantitate) if is_storno else -abs(produs.cantitate)
+        if miscari_has_id_u:
+            current_id_u = int(next_id_u)
+            next_id_u = current_id_u + 1
+            cursor.execute(
+                SQL_QUERIES["insert_miscari_consum_bc_with_id_u"],
+                [
+                    miscari_doc_id,
+                    current_id_u,
+                    pachet.data,
+                    nr_doc,
+                    "BC",
+                    produs.cod_articol_db,
+                    qty_consum,
+                    pachet.gestiune,
+                ],
+            )
+        else:
+            cursor.execute(
+                SQL_QUERIES["insert_miscari_consum_bc"],
+                [
+                    miscari_doc_id,
+                    pachet.data,
+                    nr_doc,
+                    "BC",
+                    produs.cod_articol_db,
+                    qty_consum,
+                    pachet.gestiune,
+                ],
+            )
+
     if miscari_has_pret and miscari_has_id_u:
         current_id_u = int(next_id_u)
         next_id_u = current_id_u + 1
         cursor.execute(
             SQL_QUERIES["insert_miscari_produs_bp_with_pret_and_id_u"],
             [
-                    miscari_doc_id,
+                miscari_doc_id,
                 current_id_u,
                 pachet.data,
                 nr_doc,
@@ -885,38 +917,6 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                 pachet.gestiune,
             ],
         )
-
-    for produs in request.produse:
-        qty_consum = abs(produs.cantitate) if is_storno else -abs(produs.cantitate)
-        if miscari_has_id_u:
-            current_id_u = int(next_id_u)
-            next_id_u = current_id_u + 1
-            cursor.execute(
-                SQL_QUERIES["insert_miscari_consum_bc_with_id_u"],
-                [
-                    miscari_doc_id,
-                    current_id_u,
-                    pachet.data,
-                    nr_doc,
-                    "BC",
-                    produs.cod_articol_db,
-                    qty_consum,
-                    pachet.gestiune,
-                ],
-            )
-        else:
-            cursor.execute(
-                SQL_QUERIES["insert_miscari_consum_bc"],
-                [
-                    miscari_doc_id,
-                    pachet.data,
-                    nr_doc,
-                    "BC",
-                    produs.cod_articol_db,
-                    qty_consum,
-                    pachet.gestiune,
-                ],
-            )
 
     pred_det_inserted = _insert_pred_det_rows(
         cursor=cursor,

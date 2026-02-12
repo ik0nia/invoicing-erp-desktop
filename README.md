@@ -237,10 +237,10 @@ Caracteristici:
 - o singura tranzactie (`COMMIT` la succes, `ROLLBACK` la eroare)
 - `ID_DOC` din payload este pastrat pentru legatura externa (status/API)
 - daca exista coloana `ID_U` in `MISCARI`, este setata incremental (`MAX(ID_U)+1`) pentru fiecare linie noua BC/BP
-- coloana `ID` din `MISCARI` este alocata ca `MAX(ID)+1` pe linia `BP`, iar liniile `BC` folosesc acelasi `ID`
+- coloana `ID` din `MISCARI` este alocata ca `MAX(ID)+1` pentru document, iar liniile `BC` si `BP` folosesc acelasi `ID`
 - `NR_DOC` este calculat `MAX(NR_DOC)+1` pe aceeasi data pentru `TIP_DOC='BP'`
 - insereaza consumurile/produsul finit in `MISCARI` si 1 rand de productie in `PRED_DET` (daca tabelul exista)
-- ordinea inserarii in `MISCARI` este: intai `BP`, apoi liniile `BC`
+- ordinea inserarii in `MISCARI` este: intai liniile `BC`, apoi `BP`
 - la inserarea pachetului in `ARTICOLE`, `PRET_VANZ` si `PRET_V_TVA` nu sunt setate
 - in `PRED_DET`: `ID` si `ID_UNIC` folosesc `ID`-ul documentului din `MISCARI`, `NR = MAX(NR)+1`, `DEN_GEST = 'GESTIUNEA 1'`, `DEN_TIP = 'Produse finite'`, `PRET/VALOARE = pret_vanz`, iar campurile de consum/cost primesc `cost_total`
 - cazul storno/desfacere productie (cantitati negative):
