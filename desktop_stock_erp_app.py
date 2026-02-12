@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -34,6 +35,15 @@ except Exception as exc:  # pragma: no cover - import guard
     FIREBIRD_IMPORT_ERROR = exc
 else:
     FIREBIRD_IMPORT_ERROR = None
+
+try:
+    from produce_pachet_service import FirebirdConnectionSettings, producePachet
+except Exception as exc:  # pragma: no cover - import guard
+    FirebirdConnectionSettings = None
+    producePachet = None
+    PRODUCE_PACHET_IMPORT_ERROR = exc
+else:
+    PRODUCE_PACHET_IMPORT_ERROR = None
 
 CONFIG_PATH = Path("config.json")
 
@@ -73,14 +83,24 @@ class AppConfig:
     fb_client_library_path: str = ""
     enable_sync_job: bool = True
     sync_interval_seconds: int = 120
-    sync_api_url: str = ""
+    pachet_import_api_url: str = ""
     sync_api_token: str = ""
+    pachet_status_update_api_url: str = ""
+    pachet_status_update_id_query_param: str = ""
+    pachet_import_token_query_param: str = ""
+    pachet_import_headers_json: str = ""
+    pachet_import_user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0"
     enable_export_job: bool = True
     export_interval_seconds: int = 300
     stock_select_sql: str = "SELECT SKU, QTY FROM STOCKS"
     upload_url: str = ""
     upload_field_name: str = "file"
+    upload_api_token: str = ""
+    upload_token_query_param: str = ""
+    upload_headers_json: str = ""
+    upload_user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0"
     csv_directory: str = "exports"
+    audit_log_directory: str = "audit_logs"
     http_timeout_seconds: int = 30
     verify_ssl: bool = True
     extra_upload_fields_json: str = ""
@@ -101,8 +121,18 @@ class AppConfig:
                 default=120,
                 minimum=5,
             ),
-            sync_api_url=str(data.get("sync_api_url", "")),
+            pachet_import_api_url=str(data.get("pachet_import_api_url", "")),
             sync_api_token=str(data.get("sync_api_token", "")),
+            pachet_status_update_api_url=str(data.get("pachet_status_update_api_url", "")),
+            pachet_status_update_id_query_param=str(data.get("pachet_status_update_id_query_param", "")),
+            pachet_import_token_query_param=str(data.get("pachet_import_token_query_param", "")),
+            pachet_import_headers_json=str(data.get("pachet_import_headers_json", "")),
+            pachet_import_user_agent=str(
+                data.get(
+                    "pachet_import_user_agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0",
+                )
+            ),
             enable_export_job=to_bool(data.get("enable_export_job"), default=True),
             export_interval_seconds=to_int(
                 data.get("export_interval_seconds"),
@@ -112,7 +142,17 @@ class AppConfig:
             stock_select_sql=str(data.get("stock_select_sql", "SELECT SKU, QTY FROM STOCKS")),
             upload_url=str(data.get("upload_url", "")),
             upload_field_name=str(data.get("upload_field_name", "file")),
+            upload_api_token=str(data.get("upload_api_token", "")),
+            upload_token_query_param=str(data.get("upload_token_query_param", "")),
+            upload_headers_json=str(data.get("upload_headers_json", "")),
+            upload_user_agent=str(
+                data.get(
+                    "upload_user_agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0",
+                )
+            ),
             csv_directory=str(data.get("csv_directory", "exports")),
+            audit_log_directory=str(data.get("audit_log_directory", "audit_logs")),
             http_timeout_seconds=to_int(
                 data.get("http_timeout_seconds"),
                 default=30,
@@ -151,6 +191,14 @@ class IntegrationService:
     def __init__(self, log_fn: Callable[[str], None]) -> None:
         self.log = log_fn
         self._dll_dir_handles: list[Any] = []
+        self._sensitive_query_keys = {
+            "token",
+            "access_token",
+            "api_key",
+            "apikey",
+            "key",
+            "password",
+        }
 
     def _ensure_dependencies(self) -> None:
         if requests is None:
@@ -208,91 +256,728 @@ class IntegrationService:
                 ) from exc
             raise
 
-    @staticmethod
-    def _parse_commands(payload: Any) -> list[dict[str, Any]]:
-        if isinstance(payload, list):
-            source = payload
-        elif isinstance(payload, dict):
-            for key in ("commands", "inserts", "data"):
-                candidate = payload.get(key)
-                if isinstance(candidate, list):
-                    source = candidate
-                    break
-            else:
-                source = []
-        else:
-            source = []
-
-        normalized: list[dict[str, Any]] = []
-        for item in source:
-            if isinstance(item, str):
-                sql = item.strip()
-                if sql:
-                    normalized.append({"sql": sql, "params": []})
-                continue
-            if not isinstance(item, dict):
-                continue
-            sql = str(item.get("sql", "")).strip()
-            if not sql:
-                continue
-            params = item.get("params")
-            normalized.append({"sql": sql, "params": params})
-        return normalized
-
-    def _fetch_sync_commands(self, config: AppConfig) -> list[dict[str, Any]]:
-        url = config.sync_api_url.strip()
-        if not url:
-            raise ValueError("Sync API URL is empty.")
-
+    def _fetch_json_from_api(
+        self,
+        *,
+        url: str,
+        token: str,
+        token_query_param: str,
+        headers_json: str,
+        user_agent: str,
+        config: AppConfig,
+        job_name: str,
+    ) -> Any:
         headers = {"Accept": "application/json"}
-        token = config.sync_api_token.strip()
-        if token:
+        ua = user_agent.strip()
+        if ua:
+            headers["User-Agent"] = ua
+        headers.update(self._parse_extra_fields(headers_json))
+
+        final_url = url
+        if token and token_query_param:
+            final_url = self._with_query_param(url, token_query_param, token)
+        elif token:
             headers["Authorization"] = f"Bearer {token}"
 
-        self.log(f"Fetching SQL commands from API: {url}")
+        self.log(f"Fetching {job_name} payload from API: {self._sanitize_url_for_log(final_url)}")
         response = requests.get(
-            url,
+            final_url,
             headers=headers,
             timeout=config.http_timeout_seconds,
             verify=config.verify_ssl,
         )
-        response.raise_for_status()
-        payload = response.json()
-        commands = self._parse_commands(payload)
-        self.log(f"API returned {len(commands)} command(s).")
-        return commands
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            raise RuntimeError(
+                f"{job_name} API failed with HTTP {response.status_code}. "
+                f"Server response: {self._format_http_response_for_log(response)}"
+            ) from exc
 
-    def run_sync_once(self, config: AppConfig, ignore_disabled: bool = False) -> None:
-        self._ensure_dependencies()
-        if not ignore_disabled and not config.enable_sync_job:
-            self.log("Sync job is disabled. Skipping execution.")
-            return
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                f"{job_name} API returned non-JSON response. "
+                f"Response: {self._format_http_response_for_log(response)}"
+            ) from exc
 
-        commands = self._fetch_sync_commands(config)
-        if not commands:
-            self.log("No SQL commands to execute.")
-            return
+    @staticmethod
+    def _extract_pachet_requests(payload: Any) -> tuple[list[dict[str, Any]], int]:
+        if isinstance(payload, dict) and isinstance(payload.get("pachet"), dict) and isinstance(payload.get("produse"), list):
+            source = [payload]
+        elif isinstance(payload, list):
+            source = payload
+        elif isinstance(payload, dict):
+            source = []
+            for key in ("pachete", "items", "data", "results"):
+                candidate = payload.get(key)
+                if isinstance(candidate, list):
+                    source = candidate
+                    break
+        else:
+            source = []
+
+        requests_payloads: list[dict[str, Any]] = []
+        skipped_non_processing = 0
+        for item in source:
+            if not isinstance(item, dict):
+                continue
+            pachet = item.get("pachet")
+            produse = item.get("produse")
+            if not isinstance(pachet, dict) or not isinstance(produse, list):
+                continue
+            status = str(pachet.get("status", "")).strip().lower()
+            if status != "processing":
+                skipped_non_processing += 1
+                continue
+            requests_payloads.append(item)
+        return requests_payloads, skipped_non_processing
+
+    @staticmethod
+    def _build_produce_pachet_db_settings(config: AppConfig):
+        if FirebirdConnectionSettings is None:
+            raise RuntimeError(
+                "produce_pachet_service import failed: "
+                f"{PRODUCE_PACHET_IMPORT_ERROR}"
+            )
+        return FirebirdConnectionSettings(
+            database_path=config.db_path.strip(),
+            host=config.db_host.strip(),
+            port=config.db_port,
+            user=config.db_user.strip(),
+            password=config.db_password,
+            charset=config.db_charset.strip() or "UTF8",
+            fb_client_library_path=config.fb_client_library_path.strip(),
+        )
+
+    def _verify_pachet_import_committed(
+        self,
+        config: AppConfig,
+        *,
+        pachet_data: dict[str, Any],
+        produce_result: dict[str, Any],
+        expected_bc_lines: int,
+    ) -> dict[str, Any]:
+        miscari_id_raw = produce_result.get("miscariId")
+        id_doc_raw = produce_result.get("idDoc", pachet_data.get("id_doc"))
+        nr_doc_raw = produce_result.get("nrDoc", pachet_data.get("nr_doc"))
+        data_raw = pachet_data.get("data")
+
+        if nr_doc_raw in (None, "") or not data_raw:
+            raise RuntimeError(
+                "Cannot verify DB insert: missing nrDoc/data "
+                f"(nrDoc={nr_doc_raw}, data={data_raw})."
+            )
+
+        if miscari_id_raw in (None, ""):
+            miscari_id_raw = id_doc_raw
+        try:
+            miscari_id_value = int(miscari_id_raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Cannot verify DB insert: invalid miscariId value '{miscari_id_raw}'."
+            ) from exc
+        try:
+            id_doc_value = int(id_doc_raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Cannot verify DB insert: invalid idDoc value '{id_doc_raw}'.") from exc
+        try:
+            nr_doc_value = int(nr_doc_raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Cannot verify DB insert: invalid nrDoc value '{nr_doc_raw}'.") from exc
+        try:
+            data_value = datetime.strptime(str(data_raw), "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise RuntimeError(f"Cannot verify DB insert: invalid data value '{data_raw}'.") from exc
 
         connection = self._connect(config)
         try:
             cursor = connection.cursor()
-            executed = 0
-            for command in commands:
-                sql = command["sql"]
-                params = command.get("params")
-                if params is None:
-                    cursor.execute(sql)
+            cursor.execute(
+                """
+SELECT COUNT(*)
+FROM MISCARI
+WHERE ID = ?
+  AND DATA = ?
+  AND NR_DOC = ?
+  AND TIP_DOC = ?
+""".strip(),
+                [miscari_id_value, data_value, nr_doc_value, "BC"],
+            )
+            actual_bc = int(cursor.fetchone()[0] or 0)
+
+            cursor.execute(
+                """
+SELECT COUNT(*)
+FROM MISCARI
+WHERE ID = ?
+  AND DATA = ?
+  AND NR_DOC = ?
+  AND TIP_DOC = ?
+""".strip(),
+                [miscari_id_value, data_value, nr_doc_value, "BP"],
+            )
+            actual_bp = int(cursor.fetchone()[0] or 0)
+
+            cursor.execute(
+                """
+SELECT
+    COALESCE(SUM(CASE WHEN TIP_DOC = 'BC' AND CANTITATE > 0 THEN 1 ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN TIP_DOC = 'BC' AND CANTITATE < 0 THEN 1 ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN TIP_DOC = 'BP' AND CANTITATE > 0 THEN 1 ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN TIP_DOC = 'BP' AND CANTITATE < 0 THEN 1 ELSE 0 END), 0)
+FROM MISCARI
+WHERE ID = ?
+  AND DATA = ?
+  AND NR_DOC = ?
+  AND TIP_DOC IN ('BC', 'BP')
+""".strip(),
+                [miscari_id_value, data_value, nr_doc_value],
+            )
+            bc_pos_count, bc_neg_count, bp_pos_count, bp_neg_count = cursor.fetchone()
+            bc_pos_count_int = int(bc_pos_count or 0)
+            bc_neg_count_int = int(bc_neg_count or 0)
+            bp_pos_count_int = int(bp_pos_count or 0)
+            bp_neg_count_int = int(bp_neg_count or 0)
+
+            cant_produsa_raw = pachet_data.get("cantitate_produsa")
+            try:
+                cant_produsa = float(cant_produsa_raw)
+            except (TypeError, ValueError):
+                raise RuntimeError(
+                    "Cannot verify MISCARI sign rules: invalid pachet.cantitate_produsa "
+                    f"value '{cant_produsa_raw}'."
+                )
+            is_storno = cant_produsa < 0
+
+            cursor.execute(
+                """
+SELECT TRIM(RDB$FIELD_NAME)
+FROM RDB$RELATION_FIELDS
+WHERE TRIM(RDB$RELATION_NAME) = ?
+""".strip(),
+                ["MISCARI"],
+            )
+            miscari_columns = {str(row[0]).upper() for row in cursor.fetchall()}
+
+            id_u_checked = False
+            actual_id_u_min: int | None = None
+            actual_id_u_max: int | None = None
+            distinct_id_u: int | None = None
+            id_u_ok = True
+            if "ID_U" in miscari_columns:
+                id_u_checked = True
+                expected_total_lines = expected_bc_lines + 1
+                expected_id_u_start = produce_result.get("idUStart")
+                expected_id_u_end = produce_result.get("idUEnd")
+                cursor.execute(
+                    """
+SELECT MIN(ID_U), MAX(ID_U), COUNT(DISTINCT ID_U)
+FROM MISCARI
+WHERE ID = ?
+  AND DATA = ?
+  AND NR_DOC = ?
+  AND TIP_DOC IN ('BC', 'BP')
+""".strip(),
+                    [miscari_id_value, data_value, nr_doc_value],
+                )
+                min_id_u, max_id_u, distinct_count = cursor.fetchone()
+                if min_id_u is not None:
+                    actual_id_u_min = int(min_id_u)
+                if max_id_u is not None:
+                    actual_id_u_max = int(max_id_u)
+                if distinct_count is not None:
+                    distinct_id_u = int(distinct_count)
+                id_u_ok = (
+                    distinct_id_u == expected_total_lines
+                    and actual_id_u_min is not None
+                    and actual_id_u_max is not None
+                    and (actual_id_u_max - actual_id_u_min + 1) == expected_total_lines
+                )
+                if expected_id_u_start not in (None, "") and expected_id_u_end not in (None, ""):
+                    id_u_ok = (
+                        id_u_ok
+                        and actual_id_u_min == int(expected_id_u_start)
+                        and actual_id_u_max == int(expected_id_u_end)
+                    )
+
+            cursor.execute(
+                """
+SELECT TRIM(RDB$FIELD_NAME)
+FROM RDB$RELATION_FIELDS
+WHERE TRIM(RDB$RELATION_NAME) = ?
+""".strip(),
+                ["PRED_DET"],
+            )
+            pred_det_columns = {str(row[0]).upper() for row in cursor.fetchall()}
+
+            actual_pred_det = 0
+            expected_pred_det = 1
+            pred_det_checked = False
+
+            if pred_det_columns:
+                where_parts: list[str] = []
+                params: list[Any] = []
+
+                if "ID_UNIC" in pred_det_columns:
+                    where_parts.append("ID_UNIC = ?")
+                    params.append(miscari_id_value)
+                elif "ID_DOC" in pred_det_columns:
+                    where_parts.append("ID_DOC = ?")
+                    params.append(id_doc_value)
+                elif "ID" in pred_det_columns:
+                    where_parts.append("ID = ?")
+                    params.append(miscari_id_value)
+
+                if "DATA" in pred_det_columns:
+                    where_parts.append("DATA = ?")
+                    params.append(data_value)
+                elif "DATA_DOC" in pred_det_columns:
+                    where_parts.append("DATA_DOC = ?")
+                    params.append(data_value)
+
+                if "NR_DOC" in pred_det_columns:
+                    where_parts.append("NR_DOC = ?")
+                    params.append(nr_doc_value)
+
+                # If at least one key field exists, verify PRED_DET rows.
+                if where_parts:
+                    pred_det_checked = True
+                    where_sql = " AND ".join(where_parts)
+                    cursor.execute(f"SELECT COUNT(*) FROM PRED_DET WHERE {where_sql}", params)
+                    actual_pred_det = int(cursor.fetchone()[0] or 0)
                 else:
-                    cursor.execute(sql, params)
-                executed += 1
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
+                    # Table exists but we cannot build a safe key filter.
+                    pred_det_checked = False
+
+            cursor.execute(
+                """
+SELECT TRIM(RDB$FIELD_NAME)
+FROM RDB$RELATION_FIELDS
+WHERE TRIM(RDB$RELATION_NAME) = ?
+""".strip(),
+                ["BON_DET"],
+            )
+            bon_det_columns = {str(row[0]).upper() for row in cursor.fetchall()}
+
+            actual_bon_det = 0
+            expected_bon_det = expected_bc_lines
+            bon_det_checked = False
+            bon_det_where_sql = ""
+            bon_det_where_params: list[Any] = []
+
+            if bon_det_columns:
+                where_parts = []
+                params: list[Any] = []
+
+                if "ID" in bon_det_columns:
+                    where_parts.append("ID = ?")
+                    params.append(miscari_id_value)
+                elif "ID_UNIC" in bon_det_columns:
+                    where_parts.append("ID_UNIC = ?")
+                    params.append(miscari_id_value)
+                elif "ID_DOC" in bon_det_columns:
+                    where_parts.append("ID_DOC = ?")
+                    params.append(id_doc_value)
+
+                if "DATA" in bon_det_columns:
+                    where_parts.append("DATA = ?")
+                    params.append(data_value)
+                elif "DATA_DOC" in bon_det_columns:
+                    where_parts.append("DATA_DOC = ?")
+                    params.append(data_value)
+
+                if "NR_DOC" in bon_det_columns:
+                    where_parts.append("NR_DOC = ?")
+                    params.append(nr_doc_value)
+
+                if where_parts:
+                    bon_det_checked = True
+                    bon_det_where_sql = " AND ".join(where_parts)
+                    bon_det_where_params = list(params)
+                    cursor.execute(f"SELECT COUNT(*) FROM BON_DET WHERE {bon_det_where_sql}", bon_det_where_params)
+                    actual_bon_det = int(cursor.fetchone()[0] or 0)
+                else:
+                    bon_det_checked = False
+
+            bon_det_id_u_checked = False
+            bon_det_actual_id_u_min: int | None = None
+            bon_det_actual_id_u_max: int | None = None
+            bon_det_distinct_id_u: int | None = None
+            bon_det_id_u_ok = True
+            if "ID_U" in bon_det_columns:
+                bon_det_id_u_checked = True
+                if not bon_det_checked:
+                    bon_det_id_u_ok = False
+                else:
+                    expected_bon_det_id_u_start = produce_result.get("bonDetIdUStart")
+                    expected_bon_det_id_u_end = produce_result.get("bonDetIdUEnd")
+                    cursor.execute(
+                        f"""
+SELECT MIN(ID_U), MAX(ID_U), COUNT(DISTINCT ID_U)
+FROM BON_DET
+WHERE {bon_det_where_sql}
+""".strip(),
+                        bon_det_where_params,
+                    )
+                    min_id_u, max_id_u, distinct_count = cursor.fetchone()
+                    if min_id_u is not None:
+                        bon_det_actual_id_u_min = int(min_id_u)
+                    if max_id_u is not None:
+                        bon_det_actual_id_u_max = int(max_id_u)
+                    if distinct_count is not None:
+                        bon_det_distinct_id_u = int(distinct_count)
+                    bon_det_id_u_ok = (
+                        bon_det_distinct_id_u == expected_bon_det
+                        and bon_det_actual_id_u_min is not None
+                        and bon_det_actual_id_u_max is not None
+                        and (bon_det_actual_id_u_max - bon_det_actual_id_u_min + 1) == expected_bon_det
+                    )
+                    if (
+                        expected_bon_det_id_u_start not in (None, "")
+                        and expected_bon_det_id_u_end not in (None, "")
+                    ):
+                        bon_det_id_u_ok = (
+                            bon_det_id_u_ok
+                            and bon_det_actual_id_u_min == int(expected_bon_det_id_u_start)
+                            and bon_det_actual_id_u_max == int(expected_bon_det_id_u_end)
+                        )
         finally:
             connection.close()
 
-        self.log(f"Sync job completed. Executed {executed} command(s).")
+        expected_bp = 1
+        pred_det_ok = True
+        if pred_det_checked:
+            pred_det_ok = actual_pred_det == expected_pred_det
+        elif pred_det_columns:
+            pred_det_ok = False
+
+        bon_det_ok = True
+        if bon_det_checked:
+            bon_det_ok = actual_bon_det == expected_bon_det
+        elif bon_det_columns:
+            bon_det_ok = False
+
+        sign_ok = False
+        if is_storno:
+            sign_ok = (
+                bc_pos_count_int == expected_bc_lines
+                and bc_neg_count_int == 0
+                and bp_neg_count_int == expected_bp
+                and bp_pos_count_int == 0
+            )
+        else:
+            sign_ok = (
+                bc_neg_count_int == expected_bc_lines
+                and bc_pos_count_int == 0
+                and bp_pos_count_int == expected_bp
+                and bp_neg_count_int == 0
+            )
+
+        ok = (
+            actual_bc == expected_bc_lines
+            and actual_bp == expected_bp
+            and pred_det_ok
+            and bon_det_ok
+            and id_u_ok
+            and bon_det_id_u_ok
+            and sign_ok
+        )
+        return {
+            "ok": ok,
+            "miscari_id": miscari_id_value,
+            "expected_bc": expected_bc_lines,
+            "actual_bc": actual_bc,
+            "expected_bp": expected_bp,
+            "actual_bp": actual_bp,
+            "is_storno": is_storno,
+            "bc_pos_count": bc_pos_count_int,
+            "bc_neg_count": bc_neg_count_int,
+            "bp_pos_count": bp_pos_count_int,
+            "bp_neg_count": bp_neg_count_int,
+            "id_u_checked": id_u_checked,
+            "actual_id_u_min": actual_id_u_min,
+            "actual_id_u_max": actual_id_u_max,
+            "distinct_id_u": distinct_id_u,
+            "pred_det_checked": pred_det_checked,
+            "expected_pred_det": expected_pred_det,
+            "actual_pred_det": actual_pred_det,
+            "bon_det_checked": bon_det_checked,
+            "expected_bon_det": expected_bon_det,
+            "actual_bon_det": actual_bon_det,
+            "bon_det_id_u_checked": bon_det_id_u_checked,
+            "bon_det_distinct_id_u": bon_det_distinct_id_u,
+            "bon_det_actual_id_u_min": bon_det_actual_id_u_min,
+            "bon_det_actual_id_u_max": bon_det_actual_id_u_max,
+        }
+
+    def _resolve_status_update_id_query_param(self, config: AppConfig, update_url: str) -> str:
+        configured = config.pachet_status_update_id_query_param.strip()
+        if configured:
+            return configured
+
+        token_query_param = config.pachet_import_token_query_param.strip().lower()
+        parts = urlsplit(update_url)
+        for key, _ in parse_qsl(parts.query, keep_blank_values=True):
+            lowered = key.strip().lower()
+            if not lowered:
+                continue
+            if lowered in {"status", "token", "access_token", "api_key", "apikey", "key", "password"}:
+                continue
+            if token_query_param and lowered == token_query_param:
+                continue
+            return key.strip()
+
+        return "id_pachet"
+
+    @staticmethod
+    def _resolve_status_identifier(
+        pachet_data: dict[str, Any] | None,
+        produce_result: dict[str, Any] | None,
+    ) -> str:
+        payload = pachet_data or {}
+        result = produce_result or {}
+        for key in ("id_pachet", "id_doc", "nr_doc"):
+            value = payload.get(key)
+            if value not in (None, ""):
+                return str(value).strip()
+        for key in ("idDoc", "nrDoc"):
+            value = result.get(key)
+            if value not in (None, ""):
+                return str(value).strip()
+        return ""
+
+    def _call_pachet_status_update_api(
+        self,
+        config: AppConfig,
+        *,
+        status_identifier: Any,
+        id_param_name: str,
+        id_doc: Any,
+        cod_pachet: Any,
+    ) -> None:
+        update_url = config.pachet_status_update_api_url.strip()
+        if not update_url:
+            return
+
+        id_value = str(status_identifier).strip()
+        if not id_value:
+            raise RuntimeError(
+                "Cannot update pachet status: missing identifier value "
+                f"for query parameter '{id_param_name}'."
+            )
+        if not id_param_name.strip():
+            raise RuntimeError("Cannot update pachet status: missing identifier query parameter name.")
+
+        token = config.sync_api_token.strip()
+        query_param = config.pachet_import_token_query_param.strip()
+        headers_json = config.pachet_import_headers_json.strip()
+        user_agent = config.pachet_import_user_agent.strip()
+
+        headers = {"Accept": "application/json"}
+        if user_agent:
+            headers["User-Agent"] = user_agent
+        headers.update(self._parse_extra_fields(headers_json))
+
+        final_url = self._with_query_param(update_url, id_param_name, id_value)
+        final_url = self._with_query_param(final_url, "status", "imported")
+        if token and query_param:
+            final_url = self._with_query_param(final_url, query_param, token)
+        elif token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        self.log(
+            "Import Pachete Saga: calling status update API "
+            f"for {id_param_name}={id_value} at {self._sanitize_url_for_log(final_url)}"
+        )
+        response = requests.get(
+            final_url,
+            headers=headers,
+            timeout=config.http_timeout_seconds,
+            verify=config.verify_ssl,
+        )
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            raise RuntimeError(
+                f"Status update API failed with HTTP {response.status_code}. "
+                f"Response: {self._format_http_response_for_log(response)}"
+            ) from exc
+
+        self.log(
+            "Import Pachete Saga: status updated to imported "
+            f"({id_param_name}={id_value}, id_doc={id_doc}, cod_pachet={cod_pachet})."
+        )
+        self.log(
+            "Import Pachete Saga: status update API response: "
+            f"{self._format_http_response_for_log(response)}"
+        )
+
+    def _run_pachet_import_sync(self, config: AppConfig) -> int:
+        url = config.pachet_import_api_url.strip()
+        if not url:
+            return 0
+        if producePachet is None:
+            raise RuntimeError(
+                f"produce_pachet_service import failed: {PRODUCE_PACHET_IMPORT_ERROR}"
+            )
+
+        self.log("Import Pachete Saga: starting fetch from API.")
+        payload = self._fetch_json_from_api(
+            url=url,
+            token=config.sync_api_token.strip(),
+            token_query_param=config.pachet_import_token_query_param.strip(),
+            headers_json=config.pachet_import_headers_json.strip(),
+            user_agent=config.pachet_import_user_agent.strip(),
+            config=config,
+            job_name="Import Pachete Saga",
+        )
+        items, skipped_non_processing = self._extract_pachet_requests(payload)
+        self.log(
+            "Import Pachete Saga: API returned "
+            f"{len(items)} processing request(s), skipped_non_processing={skipped_non_processing}."
+        )
+        if not items:
+            self.log("Import Pachete Saga: no processing items to import.")
+            return 0
+
+        db_settings = self._build_produce_pachet_db_settings(config)
+        db_target = self._build_db_target(config)
+        self.log(f"Import Pachete Saga: Firebird target is {db_target}")
+        success_count = 0
+        error_messages: list[str] = []
+        update_url = config.pachet_status_update_api_url.strip()
+        id_param_name = self._resolve_status_update_id_query_param(config, update_url) if update_url else ""
+        if update_url:
+            self.log(
+                "Import Pachete Saga: status update API is enabled at "
+                f"{self._sanitize_url_for_log(update_url)}."
+            )
+            self.log(f"Import Pachete Saga: status update id param is '{id_param_name}'.")
+        else:
+            self.log(
+                "Import Pachete Saga: status update API URL is not set; "
+                "status will not be pushed to external API."
+            )
+
+        for index, item in enumerate(items, start=1):
+            pachet_data = item.get("pachet") if isinstance(item, dict) else {}
+            id_doc = str((pachet_data or {}).get("id_doc", "")).strip() or "?"
+            denumire = str((pachet_data or {}).get("denumire", "")).strip() or "?"
+            self.log(
+                "Import Pachete Saga: processing "
+                f"#{index}/{len(items)} (id_doc={id_doc}, denumire={denumire})"
+            )
+            try:
+                result = producePachet(item, db_settings)
+                verification = self._verify_pachet_import_committed(
+                    config,
+                    pachet_data=pachet_data if isinstance(pachet_data, dict) else {},
+                    produce_result=result if isinstance(result, dict) else {},
+                    expected_bc_lines=len(item.get("produse", [])) if isinstance(item, dict) else 0,
+                )
+                self.log(
+                    "Import Pachete Saga: DB verification for "
+                    f"idDoc={result.get('idDoc')}, miscariId={verification['miscari_id']}, nrDoc={result.get('nrDoc')} "
+                    f"(storno={verification['is_storno']}, "
+                    f"BC+={verification['bc_pos_count']}, BC-={verification['bc_neg_count']}, "
+                    f"BP+={verification['bp_pos_count']}, BP-={verification['bp_neg_count']}), "
+                    f"(ID_U checked={verification['id_u_checked']}, "
+                    f"distinct={verification['distinct_id_u']}, "
+                    f"min={verification['actual_id_u_min']}, "
+                    f"max={verification['actual_id_u_max']}), "
+                    f"(BON_DET.ID_U checked={verification['bon_det_id_u_checked']}, "
+                    f"distinct={verification['bon_det_distinct_id_u']}, "
+                    f"min={verification['bon_det_actual_id_u_min']}, "
+                    f"max={verification['bon_det_actual_id_u_max']}), "
+                    f"(BC {verification['actual_bc']}/{verification['expected_bc']}, "
+                    f"BP {verification['actual_bp']}/{verification['expected_bp']}, "
+                    f"PRED_DET {verification['actual_pred_det']}/{verification['expected_pred_det']} "
+                    f"checked={verification['pred_det_checked']}, "
+                    f"BON_DET {verification['actual_bon_det']}/{verification['expected_bon_det']} "
+                    f"checked={verification['bon_det_checked']})."
+                )
+                if not bool(verification["ok"]):
+                    raise RuntimeError(
+                        "DB verification failed after producePachet: "
+                        f"miscariId={verification['miscari_id']}, "
+                        f"storno={verification['is_storno']}, "
+                        f"BC+={verification['bc_pos_count']}, BC-={verification['bc_neg_count']}, "
+                        f"BP+={verification['bp_pos_count']}, BP-={verification['bp_neg_count']}, "
+                        f"ID_U checked={verification['id_u_checked']}, "
+                        f"distinct={verification['distinct_id_u']}, "
+                        f"min={verification['actual_id_u_min']}, "
+                        f"max={verification['actual_id_u_max']}, "
+                        f"BON_DET.ID_U checked={verification['bon_det_id_u_checked']}, "
+                        f"distinct={verification['bon_det_distinct_id_u']}, "
+                        f"min={verification['bon_det_actual_id_u_min']}, "
+                        f"max={verification['bon_det_actual_id_u_max']}, "
+                        f"BC {verification['actual_bc']}/{verification['expected_bc']}, "
+                        f"BP {verification['actual_bp']}/{verification['expected_bp']}, "
+                        f"PRED_DET {verification['actual_pred_det']}/{verification['expected_pred_det']} "
+                        f"checked={verification['pred_det_checked']}, "
+                        f"BON_DET {verification['actual_bon_det']}/{verification['expected_bon_det']} "
+                        f"checked={verification['bon_det_checked']}."
+                    )
+
+                status_identifier = self._resolve_status_identifier(
+                    pachet_data=pachet_data if isinstance(pachet_data, dict) else {},
+                    produce_result=result if isinstance(result, dict) else {},
+                )
+
+                self._call_pachet_status_update_api(
+                    config,
+                    status_identifier=status_identifier,
+                    id_param_name=id_param_name,
+                    id_doc=result.get("idDoc"),
+                    cod_pachet=result.get("codPachet"),
+                )
+                success_count += 1
+                already_imported = bool(result.get("alreadyImported"))
+                self.log(
+                    "Import Pachete Saga: success "
+                    f"#{index}: codPachet={result.get('codPachet')}, "
+                    f"nrDoc={result.get('nrDoc')}, idDoc={result.get('idDoc')}, "
+                    f"miscariId={result.get('miscariId')}, "
+                    f"bonDetInserted={result.get('bonDetInserted')}, "
+                    f"predDetInserted={result.get('predDetInserted')}, "
+                    f"alreadyImported={already_imported}"
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                message = f"Import Pachete Saga: failed #{index}: {exc}"
+                error_messages.append(message)
+                self.log(message)
+
+        self.log(
+            "Import Pachete Saga: finished. "
+            f"success={success_count}, failed={len(error_messages)}."
+        )
+        if error_messages:
+            raise RuntimeError(
+                "Import Pachete Saga finished with errors. "
+                f"success={success_count}, failed={len(error_messages)}"
+            )
+        return success_count
+
+    def run_sync_once(self, config: AppConfig, ignore_disabled: bool = False) -> None:
+        self._ensure_dependencies()
+        if not ignore_disabled and not config.enable_sync_job:
+            self.log("Import Pachete Saga job is disabled. Skipping execution.")
+            return
+
+        pachet_url = config.pachet_import_api_url.strip()
+        if not pachet_url:
+            self.log("Import Pachete Saga API URL is empty. Set it in Import Pachete Saga tab.")
+            return
+
+        self.log("Import Pachete Saga job started.")
+        pachete_processed = self._run_pachet_import_sync(config)
+        self.log(f"Import Pachete Saga completed. Processed {pachete_processed} item(s).")
+        self.log(
+            "Import Pachete Saga summary: "
+            f"processed={pachete_processed}."
+        )
 
     def _query_stock(self, config: AppConfig) -> tuple[list[str], list[tuple[Any, ...]]]:
         sql = config.stock_select_sql.strip()
@@ -320,6 +1005,174 @@ class IntegrationService:
             raise ValueError("Extra upload fields must be a JSON object.")
         return {str(key): str(value) for key, value in parsed.items()}
 
+    @staticmethod
+    def _normalize_csv_value(value: Any) -> Any:
+        """Remove right-side padding from text values before CSV export."""
+        if isinstance(value, str):
+            # Firebird CHAR columns are often right-padded with spaces.
+            return value.rstrip(" \t")
+        return value
+
+    @staticmethod
+    def _with_query_param(url: str, key: str, value: str) -> str:
+        parts = urlsplit(url)
+        query_items = parse_qsl(parts.query, keep_blank_values=True)
+        filtered = [(k, v) for k, v in query_items if k != key]
+        filtered.append((key, value))
+        return urlunsplit(
+            (
+                parts.scheme,
+                parts.netloc,
+                parts.path,
+                urlencode(filtered, doseq=True),
+                parts.fragment,
+            )
+        )
+
+    def _sanitize_url_for_log(self, url: str) -> str:
+        parts = urlsplit(url)
+        query_items = parse_qsl(parts.query, keep_blank_values=True)
+        sanitized = []
+        for key, value in query_items:
+            if key.lower() in self._sensitive_query_keys:
+                sanitized.append((key, "***"))
+            else:
+                sanitized.append((key, value))
+        return urlunsplit(
+            (
+                parts.scheme,
+                parts.netloc,
+                parts.path,
+                urlencode(sanitized, doseq=True),
+                parts.fragment,
+            )
+        )
+
+    @staticmethod
+    def _truncate_for_log(text: str, max_length: int = 700) -> str:
+        cleaned = text.strip()
+        if not cleaned:
+            return "<empty response body>"
+        if len(cleaned) <= max_length:
+            return cleaned
+        return f"{cleaned[:max_length]}..."
+
+    def _format_http_response_for_log(self, response: Any) -> str:
+        content_type = str(response.headers.get("Content-Type", "unknown")).strip() or "unknown"
+        try:
+            payload = response.json()
+            body_text = json.dumps(payload, ensure_ascii=True)
+        except ValueError:
+            body_text = response.text
+        return (
+            f"content-type={content_type}, "
+            f"body={self._truncate_for_log(body_text)}"
+        )
+
+    @staticmethod
+    def _extract_response_body(response: Any, max_length: int = 8000) -> str:
+        try:
+            payload = response.json()
+            body_text = json.dumps(payload, ensure_ascii=True)
+        except ValueError:
+            body_text = response.text
+
+        cleaned = body_text.strip()
+        if not cleaned:
+            return "<empty response body>"
+        if len(cleaned) <= max_length:
+            return cleaned
+        return f"{cleaned[:max_length]}..."
+
+    @staticmethod
+    def _extract_response_metrics(response: Any) -> dict[str, Any]:
+        try:
+            payload = response.json()
+        except ValueError:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+
+        metrics: dict[str, Any] = {}
+        for key in (
+            "products",
+            "updated_lines",
+            "inserted_lines",
+            "created_lines",
+            "errors",
+            "ok",
+            "status",
+            "message",
+        ):
+            if key in payload:
+                metrics[key] = payload[key]
+        return metrics
+
+    def _write_upload_audit_entry(
+        self,
+        config: AppConfig,
+        *,
+        csv_path: Path,
+        row_count: int,
+        upload_url: str,
+        status: str,
+        response: Any | None = None,
+        error: str = "",
+    ) -> Path:
+        audit_dir = Path(config.audit_log_directory).expanduser().resolve()
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        day_stamp = datetime.now().strftime("%Y%m%d")
+        audit_path = audit_dir / f"upload_audit_{day_stamp}.jsonl"
+
+        entry: dict[str, Any] = {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "status": status,
+            "upload_url": self._sanitize_url_for_log(upload_url),
+            "csv_path": str(csv_path.resolve()),
+            "csv_file_name": csv_path.name,
+            "row_count": int(row_count),
+        }
+        if error:
+            entry["error"] = error
+        if response is not None:
+            entry["http_status"] = int(response.status_code)
+            entry["response_content_type"] = (
+                str(response.headers.get("Content-Type", "unknown")).strip() or "unknown"
+            )
+            entry["response_body"] = self._extract_response_body(response)
+            entry.update(self._extract_response_metrics(response))
+
+        with audit_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=True))
+            handle.write("\n")
+
+        return audit_path
+
+    def _record_upload_audit(
+        self,
+        config: AppConfig,
+        *,
+        csv_path: Path,
+        row_count: int,
+        upload_url: str,
+        status: str,
+        response: Any | None = None,
+        error: str = "",
+    ) -> None:
+        try:
+            audit_path = self._write_upload_audit_entry(
+                config,
+                csv_path=csv_path,
+                row_count=row_count,
+                upload_url=upload_url,
+                status=status,
+                response=response,
+                error=error,
+            )
+            self.log(f"Upload audit saved: {audit_path}")
+        except Exception as exc:  # pylint: disable=broad-except
+            self.log(f"Warning: could not write upload audit entry: {exc}")
+
     def _write_csv(
         self,
         config: AppConfig,
@@ -334,8 +1187,9 @@ class IntegrationService:
         with csv_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
             if headers:
-                writer.writerow(headers)
-            writer.writerows(rows)
+                writer.writerow([self._normalize_csv_value(value) for value in headers])
+            for row in rows:
+                writer.writerow([self._normalize_csv_value(value) for value in row])
 
         self.log(f"CSV generated: {csv_path}")
         return csv_path
@@ -345,36 +1199,93 @@ class IntegrationService:
         if not url:
             raise ValueError("Upload URL is empty.")
 
-        headers = {}
-        token = config.sync_api_token.strip()
-        if token:
+        headers = {"Accept": "application/json"}
+        user_agent = config.upload_user_agent.strip()
+        if user_agent:
+            headers["User-Agent"] = user_agent
+
+        token = config.upload_api_token.strip() or config.sync_api_token.strip()
+        token_query_param = config.upload_token_query_param.strip()
+        final_url = url
+        if token and token_query_param:
+            final_url = self._with_query_param(url, token_query_param, token)
+        elif token:
             headers["Authorization"] = f"Bearer {token}"
+        headers.update(self._parse_extra_fields(config.upload_headers_json))
 
-        form_data = {
-            "generated_at": datetime.now().isoformat(timespec="seconds"),
-            "row_count": str(row_count),
-        }
-        form_data.update(self._parse_extra_fields(config.extra_upload_fields_json))
+        form_data = self._parse_extra_fields(config.extra_upload_fields_json)
 
-        with csv_path.open("rb") as handle:
-            files = {
-                config.upload_field_name: (
-                    csv_path.name,
-                    handle,
-                    "text/csv",
+        response: Any | None = None
+        try:
+            with csv_path.open("rb") as handle:
+                files = {
+                    config.upload_field_name: (
+                        csv_path.name,
+                        handle,
+                        "text/csv",
+                    )
+                }
+                response = requests.post(
+                    final_url,
+                    headers=headers,
+                    data=form_data if form_data else None,
+                    files=files,
+                    timeout=config.http_timeout_seconds,
+                    verify=config.verify_ssl,
                 )
-            }
-            response = requests.post(
-                url,
-                headers=headers,
-                data=form_data,
-                files=files,
-                timeout=config.http_timeout_seconds,
-                verify=config.verify_ssl,
+                response.raise_for_status()
+        except requests.HTTPError as exc:
+            if response is None:
+                raise RuntimeError(f"Upload failed: {exc}") from exc
+            error_message = (
+                f"Upload failed with HTTP {response.status_code}. "
+                f"Server response: {self._format_http_response_for_log(response)}"
             )
-            response.raise_for_status()
+            self._record_upload_audit(
+                config,
+                csv_path=csv_path,
+                row_count=row_count,
+                upload_url=final_url,
+                status="http_error",
+                response=response,
+                error=error_message,
+            )
+            raise RuntimeError(error_message) from exc
+        except requests.RequestException as exc:
+            response = getattr(exc, "response", None)
+            error_message = f"Upload request failed: {exc}"
+            if response is not None:
+                error_message = (
+                    f"Upload failed with HTTP {response.status_code}. "
+                    f"Server response: {self._format_http_response_for_log(response)}"
+                )
+            self._record_upload_audit(
+                config,
+                csv_path=csv_path,
+                row_count=row_count,
+                upload_url=final_url,
+                status="request_error",
+                response=response,
+                error=error_message,
+            )
+            raise RuntimeError(error_message) from exc
 
-        self.log(f"CSV uploaded successfully to {url} (status {response.status_code}).")
+        if response is None:
+            raise RuntimeError("Upload failed: missing HTTP response.")
+
+        self._record_upload_audit(
+            config,
+            csv_path=csv_path,
+            row_count=row_count,
+            upload_url=final_url,
+            status="success",
+            response=response,
+        )
+        sanitized_url = self._sanitize_url_for_log(final_url)
+        self.log(
+            f"CSV uploaded successfully to {sanitized_url} (status {response.status_code}, rows {row_count})."
+        )
+        self.log(f"Upload API response: {self._format_http_response_for_log(response)}")
 
     def run_export_once(self, config: AppConfig, ignore_disabled: bool = False) -> None:
         self._ensure_dependencies()
@@ -437,7 +1348,7 @@ class SchedulerEngine:
             config = self._config
 
             if config.enable_sync_job and now >= next_sync:
-                self._run_job("sync", self.service.run_sync_once)
+                self._run_job("Import Pachete Saga", self.service.run_sync_once)
                 next_sync = now + max(5, config.sync_interval_seconds)
 
             if config.enable_export_job and now >= next_export:
@@ -482,15 +1393,25 @@ class DesktopApp(tk.Tk):
         self.var_fb_client_library = tk.StringVar()
 
         self.var_sync_enabled = tk.BooleanVar()
-        self.var_sync_api_url = tk.StringVar()
+        self.var_pachet_import_api_url = tk.StringVar()
         self.var_sync_api_token = tk.StringVar()
+        self.var_pachet_status_update_api_url = tk.StringVar()
+        self.var_pachet_status_update_id_query_param = tk.StringVar()
+        self.var_pachet_import_token_query_param = tk.StringVar()
+        self.var_pachet_import_headers_json = tk.StringVar()
+        self.var_pachet_import_user_agent = tk.StringVar()
         self.var_sync_interval = tk.StringVar()
 
         self.var_export_enabled = tk.BooleanVar()
         self.var_export_interval = tk.StringVar()
         self.var_upload_url = tk.StringVar()
         self.var_upload_field_name = tk.StringVar()
+        self.var_upload_api_token = tk.StringVar()
+        self.var_upload_token_query_param = tk.StringVar()
+        self.var_upload_headers_json = tk.StringVar()
+        self.var_upload_user_agent = tk.StringVar()
         self.var_csv_directory = tk.StringVar()
+        self.var_audit_log_directory = tk.StringVar()
         self.var_http_timeout = tk.StringVar()
         self.var_verify_ssl = tk.BooleanVar()
         self.var_extra_upload_fields = tk.StringVar()
@@ -512,7 +1433,11 @@ class DesktopApp(tk.Tk):
         self.btn_stop = ttk.Button(button_row, text="Stop scheduler", command=self._on_stop)
         self.btn_stop.pack(side="left", padx=(0, 8))
 
-        self.btn_run_sync = ttk.Button(button_row, text="Run sync now", command=self._run_sync_now)
+        self.btn_run_sync = ttk.Button(
+            button_row,
+            text="Run import now",
+            command=self._run_sync_now,
+        )
         self.btn_run_sync.pack(side="left", padx=(0, 8))
 
         self.btn_run_export = ttk.Button(
@@ -532,7 +1457,7 @@ class DesktopApp(tk.Tk):
         logs_frame = ttk.Frame(notebook, padding=12)
 
         notebook.add(firebird_frame, text="Firebird")
-        notebook.add(sync_frame, text="API sync")
+        notebook.add(sync_frame, text="Import Pachete Saga")
         notebook.add(export_frame, text="Stock export")
         notebook.add(logs_frame, text="Logs")
 
@@ -614,24 +1539,49 @@ class DesktopApp(tk.Tk):
     def _build_sync_tab(self, frame: ttk.Frame) -> None:
         frame.columnconfigure(1, weight=1)
 
-        ttk.Checkbutton(frame, text="Enable periodic sync job", variable=self.var_sync_enabled).grid(
+        ttk.Checkbutton(frame, text="Enable Import Pachete Saga job", variable=self.var_sync_enabled).grid(
             row=0,
             column=0,
             columnspan=2,
             sticky="w",
             pady=(0, 10),
         )
-        self._add_entry_row(frame, 1, "Sync API URL", self.var_sync_api_url)
-        self._add_entry_row(frame, 2, "API token (optional)", self.var_sync_api_token)
-        self._add_entry_row(frame, 3, "Sync interval (seconds)", self.var_sync_interval)
+        self._add_entry_row(frame, 1, "Import API URL", self.var_pachet_import_api_url)
+        self._add_entry_row(frame, 2, "Import API token (optional)", self.var_sync_api_token)
+        self._add_entry_row(
+            frame,
+            3,
+            "Import token query param (optional, ex: token)",
+            self.var_pachet_import_token_query_param,
+        )
+        self._add_entry_row(
+            frame,
+            4,
+            "Import headers JSON (optional)",
+            self.var_pachet_import_headers_json,
+        )
+        self._add_entry_row(frame, 5, "Import User-Agent", self.var_pachet_import_user_agent)
+        self._add_entry_row(
+            frame,
+            6,
+            "Status update API URL (optional)",
+            self.var_pachet_status_update_api_url,
+        )
+        self._add_entry_row(
+            frame,
+            7,
+            "Status update ID param (optional, ex: id_pachet)",
+            self.var_pachet_status_update_id_query_param,
+        )
+        self._add_entry_row(frame, 8, "Import interval (seconds)", self.var_sync_interval)
 
         payload_help = (
-            "Expected API payload:\n"
-            "[{\"sql\":\"INSERT INTO TBL(ID, SKU, QTY) VALUES (?, ?, ?)\",\"params\":[1,\"A1\",10]}]\n"
-            "or {\"commands\":[...]}."
+            "Expected payload:\n"
+            "{\"pachet\": {..., \"status\":\"processing\"}, \"produse\": [...]} "
+            "or {\"pachete\": [ ... ]}."
         )
         ttk.Label(frame, text=payload_help, wraplength=780, foreground="#4B5563").grid(
-            row=4,
+            row=9,
             column=0,
             columnspan=2,
             sticky="w",
@@ -651,25 +1601,40 @@ class DesktopApp(tk.Tk):
         self._add_entry_row(frame, 1, "Export interval (seconds)", self.var_export_interval)
         self._add_entry_row(frame, 2, "Upload URL (PHP endpoint)", self.var_upload_url)
         self._add_entry_row(frame, 3, "Upload file field name", self.var_upload_field_name)
+        self._add_entry_row(frame, 4, "Upload API token (optional)", self.var_upload_api_token)
+        self._add_entry_row(
+            frame,
+            5,
+            "Upload token query param (optional, ex: token)",
+            self.var_upload_token_query_param,
+        )
+        self._add_entry_row(
+            frame,
+            6,
+            "Upload headers JSON (optional)",
+            self.var_upload_headers_json,
+        )
+        self._add_entry_row(frame, 7, "Upload User-Agent", self.var_upload_user_agent)
 
-        ttk.Label(frame, text="CSV directory").grid(row=4, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="CSV directory").grid(row=8, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=self.var_csv_directory, width=78).grid(
-            row=4,
+            row=8,
             column=1,
             sticky="ew",
             pady=4,
         )
         ttk.Button(frame, text="Browse...", command=self._browse_csv_folder).grid(
-            row=4,
+            row=8,
             column=2,
             sticky="ew",
             padx=(6, 0),
             pady=4,
         )
 
-        self._add_entry_row(frame, 5, "HTTP timeout (seconds)", self.var_http_timeout)
+        self._add_entry_row(frame, 9, "Audit log directory", self.var_audit_log_directory)
+        self._add_entry_row(frame, 10, "HTTP timeout (seconds)", self.var_http_timeout)
         ttk.Checkbutton(frame, text="Verify SSL certificate", variable=self.var_verify_ssl).grid(
-            row=6,
+            row=11,
             column=0,
             columnspan=2,
             sticky="w",
@@ -677,15 +1642,15 @@ class DesktopApp(tk.Tk):
         )
         self._add_entry_row(
             frame,
-            7,
+            12,
             "Extra upload fields JSON (optional)",
             self.var_extra_upload_fields,
         )
 
-        ttk.Label(frame, text="Stock SELECT SQL").grid(row=8, column=0, sticky="nw", pady=(10, 4))
+        ttk.Label(frame, text="Stock SELECT SQL").grid(row=13, column=0, sticky="nw", pady=(10, 4))
         self.txt_stock_sql = tk.Text(frame, height=10, wrap="word")
-        self.txt_stock_sql.grid(row=8, column=1, sticky="nsew", pady=(10, 4))
-        frame.rowconfigure(8, weight=1)
+        self.txt_stock_sql.grid(row=13, column=1, sticky="nsew", pady=(10, 4))
+        frame.rowconfigure(13, weight=1)
 
     def _build_logs_tab(self, frame: ttk.Frame) -> None:
         frame.columnconfigure(0, weight=1)
@@ -724,15 +1689,25 @@ class DesktopApp(tk.Tk):
         self.var_fb_client_library.set(config.fb_client_library_path)
 
         self.var_sync_enabled.set(config.enable_sync_job)
-        self.var_sync_api_url.set(config.sync_api_url)
+        self.var_pachet_import_api_url.set(config.pachet_import_api_url)
         self.var_sync_api_token.set(config.sync_api_token)
+        self.var_pachet_status_update_api_url.set(config.pachet_status_update_api_url)
+        self.var_pachet_status_update_id_query_param.set(config.pachet_status_update_id_query_param)
+        self.var_pachet_import_token_query_param.set(config.pachet_import_token_query_param)
+        self.var_pachet_import_headers_json.set(config.pachet_import_headers_json)
+        self.var_pachet_import_user_agent.set(config.pachet_import_user_agent)
         self.var_sync_interval.set(str(config.sync_interval_seconds))
 
         self.var_export_enabled.set(config.enable_export_job)
         self.var_export_interval.set(str(config.export_interval_seconds))
         self.var_upload_url.set(config.upload_url)
         self.var_upload_field_name.set(config.upload_field_name)
+        self.var_upload_api_token.set(config.upload_api_token)
+        self.var_upload_token_query_param.set(config.upload_token_query_param)
+        self.var_upload_headers_json.set(config.upload_headers_json)
+        self.var_upload_user_agent.set(config.upload_user_agent)
         self.var_csv_directory.set(config.csv_directory)
+        self.var_audit_log_directory.set(config.audit_log_directory)
         self.var_http_timeout.set(str(config.http_timeout_seconds))
         self.var_verify_ssl.set(config.verify_ssl)
         self.var_extra_upload_fields.set(config.extra_upload_fields_json)
@@ -759,14 +1734,26 @@ class DesktopApp(tk.Tk):
             fb_client_library_path=self.var_fb_client_library.get().strip(),
             enable_sync_job=self.var_sync_enabled.get(),
             sync_interval_seconds=sync_interval,
-            sync_api_url=self.var_sync_api_url.get().strip(),
+            pachet_import_api_url=self.var_pachet_import_api_url.get().strip(),
             sync_api_token=self.var_sync_api_token.get().strip(),
+            pachet_status_update_api_url=self.var_pachet_status_update_api_url.get().strip(),
+            pachet_status_update_id_query_param=self.var_pachet_status_update_id_query_param.get().strip(),
+            pachet_import_token_query_param=self.var_pachet_import_token_query_param.get().strip(),
+            pachet_import_headers_json=self.var_pachet_import_headers_json.get().strip(),
+            pachet_import_user_agent=self.var_pachet_import_user_agent.get().strip()
+            or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0",
             enable_export_job=self.var_export_enabled.get(),
             export_interval_seconds=export_interval,
             stock_select_sql=stock_sql,
             upload_url=self.var_upload_url.get().strip(),
             upload_field_name=upload_field,
+            upload_api_token=self.var_upload_api_token.get().strip(),
+            upload_token_query_param=self.var_upload_token_query_param.get().strip(),
+            upload_headers_json=self.var_upload_headers_json.get().strip(),
+            upload_user_agent=self.var_upload_user_agent.get().strip()
+            or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopStockErpIntegration/1.0",
             csv_directory=self.var_csv_directory.get().strip() or "exports",
+            audit_log_directory=self.var_audit_log_directory.get().strip() or "audit_logs",
             http_timeout_seconds=timeout,
             verify_ssl=self.var_verify_ssl.get(),
             extra_upload_fields_json=self.var_extra_upload_fields.get().strip(),
@@ -789,8 +1776,8 @@ class DesktopApp(tk.Tk):
     def _validate_config(self, config: AppConfig) -> None:
         if not config.db_path:
             raise ValueError("Please select a Firebird database file.")
-        if config.enable_sync_job and not config.sync_api_url:
-            raise ValueError("Sync API URL is required when sync job is enabled.")
+        if config.enable_sync_job and not config.pachet_import_api_url.strip():
+            raise ValueError("Import API URL is required when Import Pachete Saga job is enabled.")
         if config.enable_export_job and not config.stock_select_sql:
             raise ValueError("Stock SELECT SQL is required when export job is enabled.")
         if config.enable_export_job and not config.upload_url:
@@ -822,7 +1809,7 @@ class DesktopApp(tk.Tk):
         self._set_button_states()
 
     def _run_sync_now(self) -> None:
-        self._run_manual_job("sync")
+        self._run_manual_job("import_pachete")
 
     def _run_export_now(self) -> None:
         self._run_manual_job("export")
@@ -836,16 +1823,21 @@ class DesktopApp(tk.Tk):
             messagebox.showerror("Cannot run job", str(exc))
             return
 
+        job_display_name = {
+            "import_pachete": "Import Pachete Saga",
+            "export": "Export stocuri",
+        }.get(name, name)
+
         def _runner() -> None:
-            self._enqueue_log(f"Manual {name} job started.")
+            self._enqueue_log(f"Manual {job_display_name} job started.")
             try:
-                if name == "sync":
+                if name == "import_pachete":
                     self.service.run_sync_once(config, ignore_disabled=True)
                 else:
                     self.service.run_export_once(config, ignore_disabled=True)
-                self._enqueue_log(f"Manual {name} job finished.")
+                self._enqueue_log(f"Manual {job_display_name} job finished.")
             except Exception as inner_exc:  # pylint: disable=broad-except
-                self._enqueue_log(f"Manual {name} job failed: {inner_exc}")
+                self._enqueue_log(f"Manual {job_display_name} job failed: {inner_exc}")
 
         thread = threading.Thread(target=_runner, daemon=True)
         thread.start()
