@@ -800,8 +800,8 @@ def _bon_det_field_value(
         "NR_DOC": nr_doc,
         "TIP_DOC": "BC",
         "TIPDOC": "BC",
-        "GESTIUNE": "Gestiunea 1",
-        "GEST": "Gestiunea 1",
+        "GESTIUNE": pachet.gestiune,
+        "GEST": pachet.gestiune,
         "DEN_GEST": "Gestiunea 1",
         "DENGEST": "Gestiunea 1",
         "DENGESTIUNE": "Gestiunea 1",
@@ -840,7 +840,7 @@ def _bon_det_field_value(
     if "COD" in upper:
         return _trim_db_char(produs.cod_articol_db)
     if "GEST" in upper:
-        return "Gestiunea 1"
+        return pachet.gestiune
     if ("DEN" in upper and "TIP" in upper) or "MATER" in upper:
         return "Materii prime"
     if upper in {"DENUMIRE_ARTICOL", "NUME_ARTICOL"}:
