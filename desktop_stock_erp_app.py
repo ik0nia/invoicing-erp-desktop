@@ -590,18 +590,16 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
                     where_parts.append("TIPDOC = ?")
                     params.append("BC")
 
-                # Some BON_DET schemas use ID as line identity, not document key.
-                # Prefer NR_DOC/DATA for verification when available.
-                if not has_nr_doc:
-                    if "ID_DOC" in bon_det_columns:
-                        where_parts.append("ID_DOC = ?")
-                        params.append(id_doc_value)
-                    elif "ID_UNIC" in bon_det_columns:
-                        where_parts.append("ID_UNIC = ?")
-                        params.append(miscari_id_value)
-                    elif "ID" in bon_det_columns:
-                        where_parts.append("ID = ?")
-                        params.append(miscari_id_value)
+                if "ID_DOC" in bon_det_columns:
+                    where_parts.append("ID_DOC = ?")
+                    params.append(id_doc_value)
+                elif "ID_UNIC" in bon_det_columns:
+                    where_parts.append("ID_UNIC = ?")
+                    params.append(miscari_id_value)
+                elif not has_nr_doc and "ID" in bon_det_columns:
+                    # Some BON_DET schemas use ID as line identity, not document key.
+                    where_parts.append("ID = ?")
+                    params.append(miscari_id_value)
 
                 if where_parts:
                     bon_det_checked = True

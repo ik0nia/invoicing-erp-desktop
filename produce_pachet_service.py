@@ -800,8 +800,8 @@ def _bon_det_field_value(
         "NR_DOC": nr_doc,
         "TIP_DOC": "BC",
         "TIPDOC": "BC",
-        "GESTIUNE": pachet.gestiune,
-        "GEST": pachet.gestiune,
+        "GESTIUNE": "Gestiunea 1",
+        "GEST": "Gestiunea 1",
         "DEN_GEST": "Gestiunea 1",
         "DENGEST": "Gestiunea 1",
         "DENGESTIUNE": "Gestiunea 1",
@@ -840,7 +840,7 @@ def _bon_det_field_value(
     if "COD" in upper:
         return _trim_db_char(produs.cod_articol_db)
     if "GEST" in upper:
-        return pachet.gestiune
+        return "Gestiunea 1"
     if ("DEN" in upper and "TIP" in upper) or "MATER" in upper:
         return "Materii prime"
     if upper in {"DENUMIRE_ARTICOL", "NUME_ARTICOL"}:
@@ -861,6 +861,87 @@ def _bon_det_field_value(
     return None
 
 
+def _get_bon_det_insertable_fields(cursor: Any) -> list[dict[str, Any]]:
+    fields = _get_relation_fields(cursor, "BON_DET")
+    if not fields:
+        raise RuntimeError(
+            "Cannot insert BON_DET rows: table BON_DET has no readable columns in current schema."
+        )
+    insertable_fields = [field for field in fields if not field["identity"]]
+    if not insertable_fields:
+        raise RuntimeError("Cannot insert BON_DET rows: no writable BON_DET columns were found.")
+    return insertable_fields
+
+
+def _insert_single_bon_det_row(
+    *,
+    cursor: Any,
+    insertable_fields: list[dict[str, Any]],
+    pachet: PachetInput,
+    produs: ProdusInput,
+    miscari_doc_id: int,
+    nr_doc: int,
+    line_no: int,
+    bon_det_id_u: int | None,
+    is_storno: bool,
+    articol_cache: dict[str, tuple[str, str]],
+) -> None:
+    qty_consum = abs(produs.cantitate) if is_storno else -abs(produs.cantitate)
+    qty_abs = abs(produs.cantitate)
+    line_value_sign = Decimal(1) if qty_consum >= 0 else Decimal(-1)
+    line_value = line_value_sign * abs(produs.val_produse)
+    unit_price = Decimal("0")
+    if qty_abs != 0:
+        unit_price = _quantize_money(abs(produs.val_produse) / qty_abs)
+
+    cod_key = produs.cod_articol_db
+    if cod_key not in articol_cache:
+        articol_cache[cod_key] = _get_articol_consum_details(cursor, cod_key)
+    produs_denumire, produs_um = articol_cache[cod_key]
+
+    columns: list[str] = []
+    values: list[Any] = []
+    missing_required: list[str] = []
+    for field in insertable_fields:
+        field_name = field["name"]
+        value = _bon_det_field_value(
+            field_name=field_name,
+            pachet=pachet,
+            produs=produs,
+            miscari_doc_id=miscari_doc_id,
+            nr_doc=nr_doc,
+            line_no=line_no,
+            bon_det_id_u=bon_det_id_u,
+            qty_consum=qty_consum,
+            unit_price=unit_price,
+            line_value=line_value,
+            produs_denumire=produs_denumire,
+            produs_um=produs_um,
+        )
+        if value is None and field["required"]:
+            value = _default_value_for_field_type(field["field_type"], pachet)
+        if value is None:
+            if field["required"]:
+                missing_required.append(field_name)
+            continue
+
+        columns.append(field_name)
+        values.append(value)
+
+    if missing_required:
+        missing_list = ", ".join(sorted(missing_required))
+        raise RuntimeError(
+            "Cannot insert BON_DET line "
+            f"{line_no}. Missing required mapped columns: {missing_list}"
+        )
+    if not columns:
+        raise RuntimeError(
+            f"Cannot insert BON_DET line {line_no}. No compatible columns were mapped."
+        )
+
+    cursor.execute(_build_dynamic_insert_sql("BON_DET", columns), values)
+
+
 def _insert_bon_det_rows(
     *,
     cursor: Any,
@@ -868,16 +949,7 @@ def _insert_bon_det_rows(
     miscari_doc_id: int,
     nr_doc: int,
 ) -> dict[str, int | None]:
-    fields = _get_relation_fields(cursor, "BON_DET")
-    if not fields:
-        raise RuntimeError(
-            "Cannot insert BON_DET rows: table BON_DET has no readable columns in current schema."
-        )
-
-    insertable_fields = [field for field in fields if not field["identity"]]
-    if not insertable_fields:
-        raise RuntimeError("Cannot insert BON_DET rows: no writable BON_DET columns were found.")
-
+    insertable_fields = _get_bon_det_insertable_fields(cursor)
     has_id_u_column = any(field["name"].upper() == "ID_U" for field in insertable_fields)
     next_id_u = _get_next_bon_det_id_u(cursor) if has_id_u_column else None
     id_u_start = next_id_u if next_id_u is not None else None
@@ -887,64 +959,22 @@ def _insert_bon_det_rows(
     articol_cache: dict[str, tuple[str, str]] = {}
 
     for line_no, produs in enumerate(request.produse, start=1):
-        qty_consum = abs(produs.cantitate) if is_storno else -abs(produs.cantitate)
-        qty_abs = abs(produs.cantitate)
-        line_value_sign = Decimal(1) if qty_consum >= 0 else Decimal(-1)
-        line_value = line_value_sign * abs(produs.val_produse)
-        unit_price = Decimal("0")
-        if qty_abs != 0:
-            unit_price = _quantize_money(abs(produs.val_produse) / qty_abs)
-
-        cod_key = produs.cod_articol_db
-        if cod_key not in articol_cache:
-            articol_cache[cod_key] = _get_articol_consum_details(cursor, cod_key)
-        produs_denumire, produs_um = articol_cache[cod_key]
-
         current_id_u = int(next_id_u) if next_id_u is not None else None
         if next_id_u is not None:
             next_id_u = current_id_u + 1
 
-        columns: list[str] = []
-        values: list[Any] = []
-        missing_required: list[str] = []
-        for field in insertable_fields:
-            field_name = field["name"]
-            value = _bon_det_field_value(
-                field_name=field_name,
-                pachet=pachet,
-                produs=produs,
-                miscari_doc_id=miscari_doc_id,
-                nr_doc=nr_doc,
-                line_no=line_no,
-                bon_det_id_u=current_id_u,
-                qty_consum=qty_consum,
-                unit_price=unit_price,
-                line_value=line_value,
-                produs_denumire=produs_denumire,
-                produs_um=produs_um,
-            )
-            if value is None and field["required"]:
-                value = _default_value_for_field_type(field["field_type"], pachet)
-            if value is None:
-                if field["required"]:
-                    missing_required.append(field_name)
-                continue
-
-            columns.append(field_name)
-            values.append(value)
-
-        if missing_required:
-            missing_list = ", ".join(sorted(missing_required))
-            raise RuntimeError(
-                "Cannot insert BON_DET line "
-                f"{line_no}. Missing required mapped columns: {missing_list}"
-            )
-        if not columns:
-            raise RuntimeError(
-                f"Cannot insert BON_DET line {line_no}. No compatible columns were mapped."
-            )
-
-        cursor.execute(_build_dynamic_insert_sql("BON_DET", columns), values)
+        _insert_single_bon_det_row(
+            cursor=cursor,
+            insertable_fields=insertable_fields,
+            pachet=pachet,
+            produs=produs,
+            miscari_doc_id=miscari_doc_id,
+            nr_doc=nr_doc,
+            line_no=line_no,
+            bon_det_id_u=current_id_u,
+            is_storno=is_storno,
+            articol_cache=articol_cache,
+        )
         inserted_rows += 1
 
     id_u_end = (int(next_id_u) - 1) if next_id_u is not None else None
@@ -989,18 +1019,17 @@ def _count_bon_det_rows_for_document(
         where_parts.append("TIPDOC = ?")
         params.append("BC")
 
-    # Some schemas use BON_DET.ID as independent identity, not document ID.
-    # Prefer NR_DOC/DATA where available, and only fall back to ID-based keys if needed.
-    if not has_nr_doc:
-        if "ID_DOC" in bon_det_columns:
-            where_parts.append("ID_DOC = ?")
-            params.append(pachet.id_doc)
-        elif "ID_UNIC" in bon_det_columns:
-            where_parts.append("ID_UNIC = ?")
-            params.append(miscari_doc_id)
-        elif "ID" in bon_det_columns:
-            where_parts.append("ID = ?")
-            params.append(miscari_doc_id)
+    if "ID_DOC" in bon_det_columns:
+        where_parts.append("ID_DOC = ?")
+        params.append(pachet.id_doc)
+    elif "ID_UNIC" in bon_det_columns:
+        where_parts.append("ID_UNIC = ?")
+        params.append(miscari_doc_id)
+    elif not has_nr_doc and "ID" in bon_det_columns:
+        # Some schemas use BON_DET.ID as independent identity, not document ID.
+        # Use ID fallback only when we don't have NR_DOC.
+        where_parts.append("ID = ?")
+        params.append(miscari_doc_id)
 
     if not where_parts:
         raise RuntimeError(
@@ -1150,11 +1179,20 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
     miscari_has_id_u = _miscari_has_id_u_column(cursor)
     next_id_u = _get_next_miscari_id_u(cursor) if miscari_has_id_u else None
     id_u_start = next_id_u if next_id_u is not None else None
+    bon_det_insertable_fields = _get_bon_det_insertable_fields(cursor)
+    bon_det_has_id_u_column = any(
+        field["name"].upper() == "ID_U" for field in bon_det_insertable_fields
+    )
+    next_bon_det_id_u = _get_next_bon_det_id_u(cursor) if bon_det_has_id_u_column else None
+    bon_det_id_u_start = next_bon_det_id_u if next_bon_det_id_u is not None else None
+    bon_det_id_u_end: int | None = None
+    bon_det_inserted = 0
+    bon_det_articol_cache: dict[str, tuple[str, str]] = {}
 
     qty_produs = abs(pachet.cantitate_produsa)
     qty_bp = -qty_produs if is_storno else qty_produs
     # Business order requested: BC rows first, then BP row.
-    for produs in request.produse:
+    for line_no, produs in enumerate(request.produse, start=1):
         qty_consum = abs(produs.cantitate) if is_storno else -abs(produs.cantitate)
         if miscari_has_id_u:
             current_id_u = int(next_id_u)
@@ -1185,6 +1223,24 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                     pachet.gestiune,
                 ],
             )
+
+        current_bon_det_id_u = int(next_bon_det_id_u) if next_bon_det_id_u is not None else None
+        if next_bon_det_id_u is not None:
+            next_bon_det_id_u = current_bon_det_id_u + 1
+            bon_det_id_u_end = current_bon_det_id_u
+        _insert_single_bon_det_row(
+            cursor=cursor,
+            insertable_fields=bon_det_insertable_fields,
+            pachet=pachet,
+            produs=produs,
+            miscari_doc_id=miscari_doc_id,
+            nr_doc=nr_doc,
+            line_no=line_no,
+            bon_det_id_u=current_bon_det_id_u,
+            is_storno=is_storno,
+            articol_cache=bon_det_articol_cache,
+        )
+        bon_det_inserted += 1
 
     if miscari_has_pret and miscari_has_id_u:
         current_id_u = int(next_id_u)
@@ -1247,12 +1303,6 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
             ],
         )
 
-    bon_det_result = _insert_bon_det_rows(
-        cursor=cursor,
-        request=request,
-        miscari_doc_id=miscari_doc_id,
-        nr_doc=nr_doc,
-    )
     pred_det_inserted = _insert_pred_det_rows(
         cursor=cursor,
         request=request,
@@ -1269,13 +1319,13 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         "nrDoc": nr_doc,
         "idDoc": pachet.id_doc,
         "miscariId": miscari_doc_id,
-        "bonDetInserted": int(bon_det_result["inserted"] or 0),
+        "bonDetInserted": bon_det_inserted,
         "predDetInserted": pred_det_inserted,
         "alreadyImported": False,
         "idUStart": id_u_start,
         "idUEnd": id_u_end,
-        "bonDetIdUStart": bon_det_result["id_u_start"],
-        "bonDetIdUEnd": bon_det_result["id_u_end"],
+        "bonDetIdUStart": bon_det_id_u_start,
+        "bonDetIdUEnd": bon_det_id_u_end,
     }
 
 
