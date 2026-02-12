@@ -106,6 +106,12 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
 SELECT COALESCE(MAX(ID_U), 0)
 FROM MISCARI
 """.strip(),
+    "select_max_miscari_id_u_prod_by_date": """
+SELECT COALESCE(MAX(ID_U), 0)
+FROM MISCARI
+WHERE DATA = ?
+  AND TIP_DOC IN ('BC', 'BP')
+""".strip(),
     "select_max_miscari_id": """
 SELECT COALESCE(MAX(ID), 0)
 FROM MISCARI
@@ -678,7 +684,11 @@ def _miscari_has_suma_desc_column(cursor: Any) -> bool:
     return int(cursor.fetchone()[0] or 0) > 0
 
 
-def _get_next_miscari_id_u(cursor: Any) -> int:
+def _get_next_miscari_id_u(cursor: Any, data_doc: date | None = None) -> int:
+    if data_doc is not None:
+        cursor.execute(SQL_QUERIES["select_max_miscari_id_u_prod_by_date"], [data_doc])
+        current_max_by_date = int(cursor.fetchone()[0] or 0)
+        return current_max_by_date + 1
     cursor.execute(SQL_QUERIES["select_max_miscari_id_u"])
     current_max = int(cursor.fetchone()[0] or 0)
     return current_max + 1
@@ -1301,7 +1311,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
     miscari_has_pret = _miscari_has_pret_column(cursor)
     miscari_has_id_u = _miscari_has_id_u_column(cursor)
     miscari_has_suma_desc = _miscari_has_suma_desc_column(cursor)
-    next_id_u = _get_next_miscari_id_u(cursor) if miscari_has_id_u else None
+    next_id_u = _get_next_miscari_id_u(cursor, pachet.data) if miscari_has_id_u else None
     id_u_start = next_id_u if next_id_u is not None else None
     bon_det_insertable_fields = _get_bon_det_insertable_fields(cursor, bon_table_name)
     bon_det_has_id_u_column = any(
