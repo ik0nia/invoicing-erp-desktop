@@ -390,6 +390,9 @@ class IntegrationService:
             data_value = datetime.strptime(str(data_raw), "%Y-%m-%d").date()
         except ValueError as exc:
             raise RuntimeError(f"Cannot verify DB insert: invalid data value '{data_raw}'.") from exc
+        bon_table_name = str(produce_result.get("bonTable") or "").strip().upper() or "BON_DET"
+        if bon_table_name not in {"BON_DET", "BON_PRED"}:
+            bon_table_name = "BON_DET"
 
         connection = self._connect(config)
         try:
@@ -557,9 +560,21 @@ SELECT TRIM(RDB$FIELD_NAME)
 FROM RDB$RELATION_FIELDS
 WHERE TRIM(RDB$RELATION_NAME) = ?
 """.strip(),
-                ["BON_DET"],
+                [bon_table_name],
             )
             bon_det_columns = {str(row[0]).upper() for row in cursor.fetchall()}
+            if not bon_det_columns and bon_table_name == "BON_DET":
+                cursor.execute(
+                    """
+SELECT TRIM(RDB$FIELD_NAME)
+FROM RDB$RELATION_FIELDS
+WHERE TRIM(RDB$RELATION_NAME) = ?
+""".strip(),
+                    ["BON_PRED"],
+                )
+                bon_det_columns = {str(row[0]).upper() for row in cursor.fetchall()}
+                if bon_det_columns:
+                    bon_table_name = "BON_PRED"
 
             actual_bon_det = 0
             expected_bon_det = expected_bc_lines
@@ -571,8 +586,7 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
                 where_parts = []
                 params: list[Any] = []
 
-                has_nr_doc = "NR_DOC" in bon_det_columns
-                if has_nr_doc:
+                if "NR_DOC" in bon_det_columns:
                     where_parts.append("NR_DOC = ?")
                     params.append(nr_doc_value)
 
@@ -604,7 +618,10 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
                     bon_det_checked = True
                     bon_det_where_sql = " AND ".join(where_parts)
                     bon_det_where_params = list(params)
-                    cursor.execute(f"SELECT COUNT(*) FROM BON_DET WHERE {bon_det_where_sql}", bon_det_where_params)
+                    cursor.execute(
+                        f"SELECT COUNT(*) FROM {bon_table_name} WHERE {bon_det_where_sql}",
+                        bon_det_where_params,
+                    )
                     actual_bon_det = int(cursor.fetchone()[0] or 0)
                 else:
                     bon_det_checked = False
@@ -624,7 +641,7 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
                     cursor.execute(
                         f"""
 SELECT MIN(ID_U), MAX(ID_U), COUNT(DISTINCT ID_U)
-FROM BON_DET
+FROM {bon_table_name}
 WHERE {bon_det_where_sql}
 """.strip(),
                         bon_det_where_params,
@@ -718,6 +735,7 @@ WHERE {bon_det_where_sql}
             "bon_det_distinct_id_u": bon_det_distinct_id_u,
             "bon_det_actual_id_u_min": bon_det_actual_id_u_min,
             "bon_det_actual_id_u_max": bon_det_actual_id_u_max,
+            "bon_table": bon_table_name,
         }
 
     def _resolve_status_update_id_query_param(self, config: AppConfig, update_url: str) -> str:
@@ -873,17 +891,21 @@ WHERE {bon_det_where_sql}
             pachet_data = item.get("pachet") if isinstance(item, dict) else {}
             id_doc = str((pachet_data or {}).get("id_doc", "")).strip() or "?"
             denumire = str((pachet_data or {}).get("denumire", "")).strip() or "?"
+            sql_trace: list[dict[str, Any]] = []
             self.log(
                 "Import Pachete Saga: processing "
                 f"#{index}/{len(items)} (id_doc={id_doc}, denumire={denumire})"
             )
             try:
-                result = producePachet(item, db_settings)
+                result = producePachet(item, db_settings, sql_trace=sql_trace)
                 verification = self._verify_pachet_import_committed(
                     config,
                     pachet_data=pachet_data if isinstance(pachet_data, dict) else {},
                     produce_result=result if isinstance(result, dict) else {},
                     expected_bc_lines=len(item.get("produse", [])) if isinstance(item, dict) else 0,
+                )
+                bon_table_label = str(
+                    verification.get("bon_table") or result.get("bonTable") or "BON_DET"
                 )
                 self.log(
                     "Import Pachete Saga: DB verification for "
@@ -895,7 +917,7 @@ WHERE {bon_det_where_sql}
                     f"distinct={verification['distinct_id_u']}, "
                     f"min={verification['actual_id_u_min']}, "
                     f"max={verification['actual_id_u_max']}), "
-                    f"(BON_DET.ID_U checked={verification['bon_det_id_u_checked']}, "
+                    f"({bon_table_label}.ID_U checked={verification['bon_det_id_u_checked']}, "
                     f"distinct={verification['bon_det_distinct_id_u']}, "
                     f"min={verification['bon_det_actual_id_u_min']}, "
                     f"max={verification['bon_det_actual_id_u_max']}), "
@@ -903,8 +925,14 @@ WHERE {bon_det_where_sql}
                     f"BP {verification['actual_bp']}/{verification['expected_bp']}, "
                     f"PRED_DET {verification['actual_pred_det']}/{verification['expected_pred_det']} "
                     f"checked={verification['pred_det_checked']}, "
-                    f"BON_DET {verification['actual_bon_det']}/{verification['expected_bon_det']} "
+                    f"{bon_table_label} {verification['actual_bon_det']}/{verification['expected_bon_det']} "
                     f"checked={verification['bon_det_checked']})."
+                )
+                self._log_sql_trace(
+                    sql_trace,
+                    context=f"Import Pachete Saga SQL trace #{index}",
+                    max_entries=120,
+                    bon_only=False,
                 )
                 if not bool(verification["ok"]):
                     raise RuntimeError(
@@ -917,7 +945,7 @@ WHERE {bon_det_where_sql}
                         f"distinct={verification['distinct_id_u']}, "
                         f"min={verification['actual_id_u_min']}, "
                         f"max={verification['actual_id_u_max']}, "
-                        f"BON_DET.ID_U checked={verification['bon_det_id_u_checked']}, "
+                        f"{bon_table_label}.ID_U checked={verification['bon_det_id_u_checked']}, "
                         f"distinct={verification['bon_det_distinct_id_u']}, "
                         f"min={verification['bon_det_actual_id_u_min']}, "
                         f"max={verification['bon_det_actual_id_u_max']}, "
@@ -925,7 +953,7 @@ WHERE {bon_det_where_sql}
                         f"BP {verification['actual_bp']}/{verification['expected_bp']}, "
                         f"PRED_DET {verification['actual_pred_det']}/{verification['expected_pred_det']} "
                         f"checked={verification['pred_det_checked']}, "
-                        f"BON_DET {verification['actual_bon_det']}/{verification['expected_bon_det']} "
+                        f"{bon_table_label} {verification['actual_bon_det']}/{verification['expected_bon_det']} "
                         f"checked={verification['bon_det_checked']}."
                     )
 
@@ -948,12 +976,19 @@ WHERE {bon_det_where_sql}
                     f"#{index}: codPachet={result.get('codPachet')}, "
                     f"nrDoc={result.get('nrDoc')}, idDoc={result.get('idDoc')}, "
                     f"miscariId={result.get('miscariId')}, "
+                    f"bonTable={result.get('bonTable')}, "
                     f"bonDetInserted={result.get('bonDetInserted')}, "
                     f"predDetInserted={result.get('predDetInserted')}, "
                     f"alreadyImported={already_imported}, "
                     f"message={result.get('message')}"
                 )
             except Exception as exc:  # pylint: disable=broad-except
+                self._log_sql_trace(
+                    sql_trace,
+                    context=f"Import Pachete Saga SQL trace #{index} (error)",
+                    max_entries=200,
+                    bon_only=False,
+                )
                 message = f"Import Pachete Saga: failed #{index}: {exc}"
                 error_messages.append(message)
                 self.log(message)
@@ -1077,6 +1112,46 @@ WHERE {bon_det_where_sql}
             f"content-type={content_type}, "
             f"body={self._truncate_for_log(body_text)}"
         )
+
+    def _log_sql_trace(
+        self,
+        sql_trace: list[dict[str, Any]],
+        *,
+        context: str,
+        max_entries: int = 120,
+        bon_only: bool = False,
+    ) -> None:
+        if not sql_trace:
+            self.log(f"{context}: no SQL statements captured.")
+            return
+
+        entries = sql_trace
+        if bon_only:
+            entries = [
+                entry
+                for entry in sql_trace
+                if "BON_DET" in str(entry.get("sql", "")).upper()
+                or "BON_PRED" in str(entry.get("sql", "")).upper()
+            ]
+            if not entries:
+                self.log(f"{context}: no BON_DET/BON_PRED SQL statements captured.")
+                return
+
+        total = len(entries)
+        shown = entries[-max_entries:] if total > max_entries else entries
+        if total > max_entries:
+            self.log(f"{context}: showing last {len(shown)} SQL statement(s) from {total}.")
+        else:
+            self.log(f"{context}: captured {total} SQL statement(s).")
+
+        for index, entry in enumerate(shown, start=1):
+            sql_text = " ".join(str(entry.get("sql", "")).split())
+            params_text = json.dumps(entry.get("params", []), ensure_ascii=True)
+            params_text = self._truncate_for_log(params_text, max_length=1200)
+            status = "OK" if bool(entry.get("ok")) else f"ERROR: {entry.get('error')}"
+            self.log(
+                f"{context}: #{index}/{len(shown)} {status} | SQL={sql_text} | params={params_text}"
+            )
 
     @staticmethod
     def _extract_response_body(response: Any, max_length: int = 8000) -> str:

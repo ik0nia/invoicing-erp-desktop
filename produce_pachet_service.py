@@ -254,6 +254,54 @@ class ProducePachetInput:
     produse: list[ProdusInput]
 
 
+_BON_CONSUMPTION_TABLE_CANDIDATES = ("BON_DET", "BON_PRED")
+
+
+def _serialize_trace_value(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, dt_time):
+        return value.isoformat()
+    return str(value)
+
+
+class _TracingCursor:
+    def __init__(self, cursor: Any, sql_trace: list[dict[str, Any]]) -> None:
+        self._cursor = cursor
+        self._sql_trace = sql_trace
+
+    def execute(self, sql: str, params: list[Any] | tuple[Any, ...] | None = None) -> Any:
+        serialized_params = []
+        if params is not None:
+            serialized_params = [_serialize_trace_value(param) for param in params]
+        entry: dict[str, Any] = {
+            "sql": str(sql).strip(),
+            "params": serialized_params,
+            "ok": False,
+        }
+        try:
+            if params is None:
+                result = self._cursor.execute(sql)
+            else:
+                result = self._cursor.execute(sql, params)
+            entry["ok"] = True
+            self._sql_trace.append(entry)
+            return result
+        except Exception as exc:
+            entry["error"] = str(exc)
+            self._sql_trace.append(entry)
+            raise
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cursor, name)
+
+
 def get_produce_pachet_sql_queries() -> dict[str, str]:
     """Return all SQL strings used by producePachet."""
     return dict(SQL_QUERIES)
@@ -618,10 +666,20 @@ def _get_next_pred_det_nr(cursor: Any) -> int:
     return current_max + 1
 
 
-def _get_next_bon_det_id_u(cursor: Any) -> int:
-    cursor.execute(SQL_QUERIES["select_max_bon_det_id_u"])
+def _get_next_bon_det_id_u(cursor: Any, bon_table_name: str) -> int:
+    cursor.execute(f"SELECT COALESCE(MAX(ID_U), 0) FROM {_quote_identifier(bon_table_name)}")
     current_max = int(cursor.fetchone()[0] or 0)
     return current_max + 1
+
+
+def _resolve_bon_consumption_table(cursor: Any) -> str:
+    for table_name in _BON_CONSUMPTION_TABLE_CANDIDATES:
+        fields = _get_relation_fields(cursor, table_name)
+        if fields:
+            return table_name
+    raise RuntimeError(
+        "Cannot insert consumption rows: neither BON_DET nor BON_PRED table was found."
+    )
 
 
 def _get_articol_consum_details(cursor: Any, cod_articol_db: str) -> tuple[str, str]:
@@ -629,7 +687,7 @@ def _get_articol_consum_details(cursor: Any, cod_articol_db: str) -> tuple[str, 
     row = cursor.fetchone()
     if not row:
         raise RuntimeError(
-            "Cannot insert BON_DET consumption line because product was not found in ARTICOLE "
+            "Cannot insert consumption detail line because product was not found in ARTICOLE "
             f"(cod_articol={_trim_db_char(cod_articol_db)})."
         )
 
@@ -861,21 +919,25 @@ def _bon_det_field_value(
     return None
 
 
-def _get_bon_det_insertable_fields(cursor: Any) -> list[dict[str, Any]]:
-    fields = _get_relation_fields(cursor, "BON_DET")
+def _get_bon_det_insertable_fields(cursor: Any, bon_table_name: str) -> list[dict[str, Any]]:
+    fields = _get_relation_fields(cursor, bon_table_name)
     if not fields:
         raise RuntimeError(
-            "Cannot insert BON_DET rows: table BON_DET has no readable columns in current schema."
+            "Cannot insert consumption rows: table "
+            f"{bon_table_name} has no readable columns in current schema."
         )
     insertable_fields = [field for field in fields if not field["identity"]]
     if not insertable_fields:
-        raise RuntimeError("Cannot insert BON_DET rows: no writable BON_DET columns were found.")
+        raise RuntimeError(
+            f"Cannot insert consumption rows: no writable columns were found in {bon_table_name}."
+        )
     return insertable_fields
 
 
 def _insert_single_bon_det_row(
     *,
     cursor: Any,
+    bon_table_name: str,
     insertable_fields: list[dict[str, Any]],
     pachet: PachetInput,
     produs: ProdusInput,
@@ -931,27 +993,28 @@ def _insert_single_bon_det_row(
     if missing_required:
         missing_list = ", ".join(sorted(missing_required))
         raise RuntimeError(
-            "Cannot insert BON_DET line "
-            f"{line_no}. Missing required mapped columns: {missing_list}"
+            f"Cannot insert {bon_table_name} line {line_no}. "
+            f"Missing required mapped columns: {missing_list}"
         )
     if not columns:
         raise RuntimeError(
-            f"Cannot insert BON_DET line {line_no}. No compatible columns were mapped."
+            f"Cannot insert {bon_table_name} line {line_no}. No compatible columns were mapped."
         )
 
-    cursor.execute(_build_dynamic_insert_sql("BON_DET", columns), values)
+    cursor.execute(_build_dynamic_insert_sql(bon_table_name, columns), values)
 
 
 def _insert_bon_det_rows(
     *,
     cursor: Any,
+    bon_table_name: str,
     request: ProducePachetInput,
     miscari_doc_id: int,
     nr_doc: int,
 ) -> dict[str, int | None]:
-    insertable_fields = _get_bon_det_insertable_fields(cursor)
+    insertable_fields = _get_bon_det_insertable_fields(cursor, bon_table_name)
     has_id_u_column = any(field["name"].upper() == "ID_U" for field in insertable_fields)
-    next_id_u = _get_next_bon_det_id_u(cursor) if has_id_u_column else None
+    next_id_u = _get_next_bon_det_id_u(cursor, bon_table_name) if has_id_u_column else None
     id_u_start = next_id_u if next_id_u is not None else None
     inserted_rows = 0
     pachet = request.pachet
@@ -965,6 +1028,7 @@ def _insert_bon_det_rows(
 
         _insert_single_bon_det_row(
             cursor=cursor,
+            bon_table_name=bon_table_name,
             insertable_fields=insertable_fields,
             pachet=pachet,
             produs=produs,
@@ -988,19 +1052,21 @@ def _insert_bon_det_rows(
 def _count_bon_det_rows_for_document(
     *,
     cursor: Any,
+    bon_table_name: str,
     pachet: PachetInput,
     miscari_doc_id: int,
     nr_doc: int,
 ) -> int:
-    fields = _get_relation_fields(cursor, "BON_DET")
+    fields = _get_relation_fields(cursor, bon_table_name)
     if not fields:
-        raise RuntimeError("Cannot inspect BON_DET rows: table BON_DET has no readable columns.")
+        raise RuntimeError(
+            f"Cannot inspect consumption rows: table {bon_table_name} has no readable columns."
+        )
 
     bon_det_columns = {str(field["name"]).upper() for field in fields}
     where_parts: list[str] = []
     params: list[Any] = []
 
-    has_nr_doc = "NR_DOC" in bon_det_columns
     if "NR_DOC" in bon_det_columns:
         where_parts.append("NR_DOC = ?")
         params.append(nr_doc)
@@ -1031,12 +1097,12 @@ def _count_bon_det_rows_for_document(
 
     if not where_parts:
         raise RuntimeError(
-            "Cannot inspect BON_DET rows: no compatible key columns were found "
+            f"Cannot inspect consumption rows in {bon_table_name}: no compatible key columns were found "
             "(expected NR_DOC/DATA or one of ID_DOC/ID_UNIC/ID)."
         )
 
     where_sql = " AND ".join(where_parts)
-    cursor.execute(f"SELECT COUNT(*) FROM BON_DET WHERE {where_sql}", params)
+    cursor.execute(f"SELECT COUNT(*) FROM {_quote_identifier(bon_table_name)} WHERE {where_sql}", params)
     return int(cursor.fetchone()[0] or 0)
 
 
@@ -1106,6 +1172,7 @@ def _insert_pred_det_rows(
 def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> dict[str, Any]:
     pachet = request.pachet
     is_storno = _operation_sign(pachet) < 0
+    bon_table_name = _resolve_bon_consumption_table(cursor)
     expected_bon_det_lines = len(request.produse)
     existing = _find_existing_document(cursor, pachet)
     if existing is not None:
@@ -1117,6 +1184,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         nr_doc_existing = int(existing["nr_doc"])
         existing_bon_det_count = _count_bon_det_rows_for_document(
             cursor=cursor,
+            bon_table_name=bon_table_name,
             pachet=pachet,
             miscari_doc_id=miscari_id_existing,
             nr_doc=nr_doc_existing,
@@ -1128,6 +1196,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         if existing_bon_det_count == 0:
             bon_det_result = _insert_bon_det_rows(
                 cursor=cursor,
+                bon_table_name=bon_table_name,
                 request=request,
                 miscari_doc_id=miscari_id_existing,
                 nr_doc=nr_doc_existing,
@@ -1145,9 +1214,9 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
             )
         elif existing_bon_det_count != expected_bon_det_lines:
             raise RuntimeError(
-                "Existing production document has inconsistent BON_DET rows "
+                "Existing production document has inconsistent consumption detail rows "
                 f"(id_doc={pachet.id_doc}, data={pachet.data}, nr_doc={nr_doc_existing}, "
-                f"existing_bon_det={existing_bon_det_count}, expected={expected_bon_det_lines})."
+                f"table={bon_table_name}, existing={existing_bon_det_count}, expected={expected_bon_det_lines})."
             )
 
         return {
@@ -1155,13 +1224,14 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
             "message": (
                 "producePachet skipped: document already imported."
                 if bon_det_inserted == 0
-                else "producePachet recovered: BON_DET rows inserted for existing document."
+                else "producePachet recovered: consumption detail rows inserted for existing document."
             ),
             "codPachet": _trim_db_char(cod_pachet_db),
             "nrDoc": nr_doc_existing,
             "idDoc": pachet.id_doc,
             "miscariId": miscari_id_existing,
             "bonDetInserted": bon_det_inserted,
+            "bonTable": bon_table_name,
             "predDetInserted": 0,
             "alreadyImported": True,
             "idUStart": None,
@@ -1177,11 +1247,13 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
     miscari_has_id_u = _miscari_has_id_u_column(cursor)
     next_id_u = _get_next_miscari_id_u(cursor) if miscari_has_id_u else None
     id_u_start = next_id_u if next_id_u is not None else None
-    bon_det_insertable_fields = _get_bon_det_insertable_fields(cursor)
+    bon_det_insertable_fields = _get_bon_det_insertable_fields(cursor, bon_table_name)
     bon_det_has_id_u_column = any(
         field["name"].upper() == "ID_U" for field in bon_det_insertable_fields
     )
-    next_bon_det_id_u = _get_next_bon_det_id_u(cursor) if bon_det_has_id_u_column else None
+    next_bon_det_id_u = (
+        _get_next_bon_det_id_u(cursor, bon_table_name) if bon_det_has_id_u_column else None
+    )
     bon_det_id_u_start = next_bon_det_id_u if next_bon_det_id_u is not None else None
     bon_det_id_u_end: int | None = None
     bon_det_inserted = 0
@@ -1228,6 +1300,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
             bon_det_id_u_end = current_bon_det_id_u
         _insert_single_bon_det_row(
             cursor=cursor,
+            bon_table_name=bon_table_name,
             insertable_fields=bon_det_insertable_fields,
             pachet=pachet,
             produs=produs,
@@ -1318,6 +1391,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         "idDoc": pachet.id_doc,
         "miscariId": miscari_doc_id,
         "bonDetInserted": bon_det_inserted,
+        "bonTable": bon_table_name,
         "predDetInserted": pred_det_inserted,
         "alreadyImported": False,
         "idUStart": id_u_start,
@@ -1327,7 +1401,11 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
     }
 
 
-def producePachet(payload: Any, db_settings: FirebirdConnectionSettings) -> dict[str, Any]:
+def producePachet(
+    payload: Any,
+    db_settings: FirebirdConnectionSettings,
+    sql_trace: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """
     Create production package movements in one Firebird transaction.
 
@@ -1351,7 +1429,8 @@ def producePachet(payload: Any, db_settings: FirebirdConnectionSettings) -> dict
             charset=db_settings.charset,
         )
         try:
-            cursor = connection.cursor()
+            cursor_raw = connection.cursor()
+            cursor = _TracingCursor(cursor_raw, sql_trace) if sql_trace is not None else cursor_raw
             result = _execute_produce_pachet_once(cursor, request)
             connection.commit()
             return result
