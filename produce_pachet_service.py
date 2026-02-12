@@ -957,7 +957,10 @@ def _insert_single_bon_det_row(
     is_storno: bool,
     articol_cache: dict[str, tuple[str, str]],
 ) -> None:
-    qty_consum = abs(produs.cantitate) if is_storno else -abs(produs.cantitate)
+    # BON detail requirement:
+    # - normal production: positive quantity/value
+    # - storno: negative quantity/value
+    qty_consum = -abs(produs.cantitate) if is_storno else abs(produs.cantitate)
     qty_abs = abs(produs.cantitate)
     line_value_sign = Decimal(1) if qty_consum >= 0 else Decimal(-1)
     line_value = line_value_sign * abs(produs.val_produse)
