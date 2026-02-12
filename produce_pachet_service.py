@@ -950,6 +950,53 @@ def _insert_bon_det_rows(
     }
 
 
+def _count_bon_det_rows_for_document(
+    *,
+    cursor: Any,
+    pachet: PachetInput,
+    miscari_doc_id: int,
+    nr_doc: int,
+) -> int:
+    fields = _get_relation_fields(cursor, "BON_DET")
+    if not fields:
+        raise RuntimeError("Cannot inspect BON_DET rows: table BON_DET has no readable columns.")
+
+    bon_det_columns = {str(field["name"]).upper() for field in fields}
+    where_parts: list[str] = []
+    params: list[Any] = []
+
+    if "ID" in bon_det_columns:
+        where_parts.append("ID = ?")
+        params.append(miscari_doc_id)
+    elif "ID_UNIC" in bon_det_columns:
+        where_parts.append("ID_UNIC = ?")
+        params.append(miscari_doc_id)
+    elif "ID_DOC" in bon_det_columns:
+        where_parts.append("ID_DOC = ?")
+        params.append(pachet.id_doc)
+
+    if "DATA" in bon_det_columns:
+        where_parts.append("DATA = ?")
+        params.append(pachet.data)
+    elif "DATA_DOC" in bon_det_columns:
+        where_parts.append("DATA_DOC = ?")
+        params.append(pachet.data)
+
+    if "NR_DOC" in bon_det_columns:
+        where_parts.append("NR_DOC = ?")
+        params.append(nr_doc)
+
+    if not where_parts:
+        raise RuntimeError(
+            "Cannot inspect BON_DET rows: no compatible key columns were found "
+            "(expected one of ID/ID_UNIC/ID_DOC plus DATA/NR_DOC where available)."
+        )
+
+    where_sql = " AND ".join(where_parts)
+    cursor.execute(f"SELECT COUNT(*) FROM BON_DET WHERE {where_sql}", params)
+    return int(cursor.fetchone()[0] or 0)
+
+
 def _insert_pred_det_rows(
     cursor: Any,
     request: ProducePachetInput,
@@ -1016,26 +1063,68 @@ def _insert_pred_det_rows(
 def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> dict[str, Any]:
     pachet = request.pachet
     is_storno = _operation_sign(pachet) < 0
+    expected_bon_det_lines = len(request.produse)
     existing = _find_existing_document(cursor, pachet)
     if existing is not None:
         cod_pachet_db = str(existing.get("cod_pachet_db") or "")
         if not cod_pachet_db:
             # Fallback if legacy rows did not have usable COD_ART.
             cod_pachet_db = ensurePachetInArticole(cursor, pachet)
+        miscari_id_existing = int(existing.get("miscari_id") or 0)
+        nr_doc_existing = int(existing["nr_doc"])
+        existing_bon_det_count = _count_bon_det_rows_for_document(
+            cursor=cursor,
+            pachet=pachet,
+            miscari_doc_id=miscari_id_existing,
+            nr_doc=nr_doc_existing,
+        )
+
+        bon_det_inserted = 0
+        bon_det_id_u_start: int | None = None
+        bon_det_id_u_end: int | None = None
+        if existing_bon_det_count == 0:
+            bon_det_result = _insert_bon_det_rows(
+                cursor=cursor,
+                request=request,
+                miscari_doc_id=miscari_id_existing,
+                nr_doc=nr_doc_existing,
+            )
+            bon_det_inserted = int(bon_det_result["inserted"] or 0)
+            bon_det_id_u_start = (
+                int(bon_det_result["id_u_start"])
+                if bon_det_result["id_u_start"] is not None
+                else None
+            )
+            bon_det_id_u_end = (
+                int(bon_det_result["id_u_end"])
+                if bon_det_result["id_u_end"] is not None
+                else None
+            )
+        elif existing_bon_det_count != expected_bon_det_lines:
+            raise RuntimeError(
+                "Existing production document has inconsistent BON_DET rows "
+                f"(id_doc={pachet.id_doc}, data={pachet.data}, nr_doc={nr_doc_existing}, "
+                f"existing_bon_det={existing_bon_det_count}, expected={expected_bon_det_lines})."
+            )
+
         return {
             "success": True,
-            "message": "producePachet skipped: document already imported.",
+            "message": (
+                "producePachet skipped: document already imported."
+                if bon_det_inserted == 0
+                else "producePachet recovered: BON_DET rows inserted for existing document."
+            ),
             "codPachet": _trim_db_char(cod_pachet_db),
-            "nrDoc": int(existing["nr_doc"]),
+            "nrDoc": nr_doc_existing,
             "idDoc": pachet.id_doc,
-            "miscariId": int(existing.get("miscari_id") or 0),
-            "bonDetInserted": 0,
+            "miscariId": miscari_id_existing,
+            "bonDetInserted": bon_det_inserted,
             "predDetInserted": 0,
             "alreadyImported": True,
             "idUStart": None,
             "idUEnd": None,
-            "bonDetIdUStart": None,
-            "bonDetIdUEnd": None,
+            "bonDetIdUStart": bon_det_id_u_start,
+            "bonDetIdUEnd": bon_det_id_u_end,
         }
 
     cod_pachet_db = ensurePachetInArticole(cursor, pachet, allow_create=not is_storno)
