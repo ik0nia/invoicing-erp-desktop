@@ -160,6 +160,31 @@ INSERT INTO MISCARI (
     GESTIUNE
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 """.strip(),
+    "insert_miscari_consum_bc_with_suma_desc": """
+INSERT INTO MISCARI (
+    ID,
+    DATA,
+    NR_DOC,
+    TIP_DOC,
+    COD_ART,
+    CANTITATE,
+    GESTIUNE,
+    SUMA_DESC
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+""".strip(),
+    "insert_miscari_consum_bc_with_id_u_and_suma_desc": """
+INSERT INTO MISCARI (
+    ID,
+    ID_U,
+    DATA,
+    NR_DOC,
+    TIP_DOC,
+    COD_ART,
+    CANTITATE,
+    GESTIUNE,
+    SUMA_DESC
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+""".strip(),
     "insert_miscari_produs_bp_with_pret": """
 INSERT INTO MISCARI (
     ID,
@@ -648,6 +673,11 @@ def _miscari_has_id_u_column(cursor: Any) -> bool:
     return int(cursor.fetchone()[0] or 0) > 0
 
 
+def _miscari_has_suma_desc_column(cursor: Any) -> bool:
+    cursor.execute(SQL_QUERIES["check_miscari_has_pret_column"], ["MISCARI", "SUMA_DESC"])
+    return int(cursor.fetchone()[0] or 0) > 0
+
+
 def _get_next_miscari_id_u(cursor: Any) -> int:
     cursor.execute(SQL_QUERIES["select_max_miscari_id_u"])
     current_max = int(cursor.fetchone()[0] or 0)
@@ -920,6 +950,8 @@ def _bon_det_field_value(
     if upper.startswith("PRET"):
         return unit_price
     if "SUMA_DESC" in upper:
+        return line_value
+    if "SUMA" in upper and "DESC" in upper:
         return line_value
     if "VAL" in upper or "COST" in upper:
         return line_value
@@ -1268,6 +1300,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
     nr_doc = getNextNrDoc(cursor, pachet.data)
     miscari_has_pret = _miscari_has_pret_column(cursor)
     miscari_has_id_u = _miscari_has_id_u_column(cursor)
+    miscari_has_suma_desc = _miscari_has_suma_desc_column(cursor)
     next_id_u = _get_next_miscari_id_u(cursor) if miscari_has_id_u else None
     id_u_start = next_id_u if next_id_u is not None else None
     bon_det_insertable_fields = _get_bon_det_insertable_fields(cursor, bon_table_name)
@@ -1293,7 +1326,25 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
     # Business order requested: BC rows first, then BP row.
     for line_no, produs in enumerate(request.produse, start=1):
         qty_consum = abs(produs.cantitate) if is_storno else -abs(produs.cantitate)
-        if miscari_has_id_u:
+        bc_total_value = abs(produs.val_produse) if is_storno else -abs(produs.val_produse)
+        if miscari_has_id_u and miscari_has_suma_desc:
+            current_id_u = int(next_id_u)
+            next_id_u = current_id_u + 1
+            cursor.execute(
+                SQL_QUERIES["insert_miscari_consum_bc_with_id_u_and_suma_desc"],
+                [
+                    miscari_doc_id,
+                    current_id_u,
+                    pachet.data,
+                    nr_doc,
+                    "BC",
+                    produs.cod_articol_db,
+                    qty_consum,
+                    pachet.gestiune,
+                    bc_total_value,
+                ],
+            )
+        elif miscari_has_id_u:
             current_id_u = int(next_id_u)
             next_id_u = current_id_u + 1
             cursor.execute(
@@ -1307,6 +1358,20 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                     produs.cod_articol_db,
                     qty_consum,
                     pachet.gestiune,
+                ],
+            )
+        elif miscari_has_suma_desc:
+            cursor.execute(
+                SQL_QUERIES["insert_miscari_consum_bc_with_suma_desc"],
+                [
+                    miscari_doc_id,
+                    pachet.data,
+                    nr_doc,
+                    "BC",
+                    produs.cod_articol_db,
+                    qty_consum,
+                    pachet.gestiune,
+                    bc_total_value,
                 ],
             )
         else:
