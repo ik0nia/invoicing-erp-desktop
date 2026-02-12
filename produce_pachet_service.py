@@ -43,6 +43,12 @@ INSERT INTO ARTICOLE (
     TIP
 ) VALUES (?, ?, ?, ?, ?, ?)
 """.strip(),
+    "update_articole_stoc_by_cod": """
+UPDATE ARTICOLE
+SET STOC = COALESCE(STOC, 0) + ?
+WHERE COD = ?
+   OR TRIM(COD) = TRIM(?)
+""".strip(),
     "select_max_nr_doc_bp_by_date": """
 SELECT COALESCE(MAX(NR_DOC), 0)
 FROM MISCARI
@@ -678,6 +684,11 @@ def _miscari_has_suma_desc_column(cursor: Any) -> bool:
     return int(cursor.fetchone()[0] or 0) > 0
 
 
+def _articole_has_stoc_column(cursor: Any) -> bool:
+    cursor.execute(SQL_QUERIES["check_miscari_has_pret_column"], ["ARTICOLE", "STOC"])
+    return int(cursor.fetchone()[0] or 0) > 0
+
+
 def _get_next_miscari_id_u(cursor: Any) -> int:
     cursor.execute(SQL_QUERIES["select_max_miscari_id_u"])
     current_max = int(cursor.fetchone()[0] or 0)
@@ -1288,6 +1299,8 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
             "bonDetInserted": bon_det_inserted,
             "bonTable": bon_table_name,
             "predDetInserted": 0,
+            "articoleStocUpdated": False,
+            "articoleStocDelta": "0",
             "alreadyImported": True,
             "idUStart": None,
             "idUEnd": None,
@@ -1484,6 +1497,13 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         miscari_doc_id=miscari_doc_id,
         nr_doc=nr_doc,
     )
+    articole_stoc_updated = False
+    if _articole_has_stoc_column(cursor):
+        cursor.execute(
+            SQL_QUERIES["update_articole_stoc_by_cod"],
+            [qty_bp, cod_pachet_db, cod_pachet_db],
+        )
+        articole_stoc_updated = True
     id_u_end = (int(next_id_u) - 1) if next_id_u is not None else None
 
     return {
@@ -1496,6 +1516,8 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         "bonDetInserted": bon_det_inserted,
         "bonTable": bon_table_name,
         "predDetInserted": pred_det_inserted,
+        "articoleStocUpdated": articole_stoc_updated,
+        "articoleStocDelta": str(qty_bp),
         "alreadyImported": False,
         "idUStart": id_u_start,
         "idUEnd": id_u_end,

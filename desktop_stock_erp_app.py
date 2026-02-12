@@ -980,6 +980,8 @@ WHERE {bon_det_where_sql}
                     f"bonTable={result.get('bonTable')}, "
                     f"bonDetInserted={result.get('bonDetInserted')}, "
                     f"predDetInserted={result.get('predDetInserted')}, "
+                    f"articoleStocUpdated={result.get('articoleStocUpdated')}, "
+                    f"articoleStocDelta={result.get('articoleStocDelta')}, "
                     f"alreadyImported={already_imported}, "
                     f"message={result.get('message')}"
                 )
