@@ -671,6 +671,7 @@ def _pred_det_field_value(
         "ID": miscari_doc_id,
         "ID_UNIC": miscari_doc_id,
         "IDUNIC": miscari_doc_id,
+        "VALIDAT": "V",
         "DATA": pachet.data,
         "DATA_DOC": pachet.data,
         "NR_DOC": nr_doc,
