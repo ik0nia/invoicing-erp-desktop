@@ -198,6 +198,21 @@ Acesta salveaza CSV-ul intr-un folder local `uploads/` si returneaza JSON.
 
 ## Build executabil Windows (.exe)
 
+### Varianta usoara (recomandat)
+
+In radacina proiectului ruleaza direct:
+
+```bat
+build_exe.bat
+```
+
+Scriptul creeaza automat `.venv`, instaleaza dependintele si face build.
+Executabilul rezultat va fi in:
+
+- `dist\DesktopStockErpIntegration\DesktopStockErpIntegration.exe`
+
+### Varianta manuala
+
 Instaleaza PyInstaller:
 
 ```bash
@@ -207,10 +222,8 @@ pip install pyinstaller
 Genereaza exe:
 
 ```bash
-pyinstaller --noconfirm --onefile --windowed desktop_stock_erp_app.py
+pyinstaller --noconfirm --clean --onedir --windowed --name DesktopStockErpIntegration --hidden-import=pystray._win32 --collect-all pystray --collect-all PIL desktop_stock_erp_app.py
 ```
-
-Executabilul rezultat va fi in `dist/desktop_stock_erp_app.exe`.
 
 ---
 
