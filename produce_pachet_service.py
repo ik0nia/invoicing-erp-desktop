@@ -800,8 +800,8 @@ def _bon_det_field_value(
         "NR_DOC": nr_doc,
         "TIP_DOC": "BC",
         "TIPDOC": "BC",
-        "GESTIUNE": pachet.gestiune,
-        "GEST": pachet.gestiune,
+        "GESTIUNE": "0001",
+        "GEST": "0001",
         "DEN_GEST": "Gestiunea 1",
         "DENGEST": "Gestiunea 1",
         "DENGESTIUNE": "Gestiunea 1",
@@ -840,7 +840,7 @@ def _bon_det_field_value(
     if "COD" in upper:
         return _trim_db_char(produs.cod_articol_db)
     if "GEST" in upper:
-        return pachet.gestiune
+        return "0001"
     if ("DEN" in upper and "TIP" in upper) or "MATER" in upper:
         return "Materii prime"
     if upper in {"DENUMIRE_ARTICOL", "NUME_ARTICOL"}:
@@ -1022,12 +1022,10 @@ def _count_bon_det_rows_for_document(
     if "ID_DOC" in bon_det_columns:
         where_parts.append("ID_DOC = ?")
         params.append(pachet.id_doc)
-    elif "ID_UNIC" in bon_det_columns:
+    if "ID_UNIC" in bon_det_columns:
         where_parts.append("ID_UNIC = ?")
         params.append(miscari_doc_id)
-    elif not has_nr_doc and "ID" in bon_det_columns:
-        # Some schemas use BON_DET.ID as independent identity, not document ID.
-        # Use ID fallback only when we don't have NR_DOC.
+    if "ID" in bon_det_columns:
         where_parts.append("ID = ?")
         params.append(miscari_doc_id)
 

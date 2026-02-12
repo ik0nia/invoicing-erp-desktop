@@ -593,11 +593,10 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
                 if "ID_DOC" in bon_det_columns:
                     where_parts.append("ID_DOC = ?")
                     params.append(id_doc_value)
-                elif "ID_UNIC" in bon_det_columns:
+                if "ID_UNIC" in bon_det_columns:
                     where_parts.append("ID_UNIC = ?")
                     params.append(miscari_id_value)
-                elif not has_nr_doc and "ID" in bon_det_columns:
-                    # Some BON_DET schemas use ID as line identity, not document key.
+                if "ID" in bon_det_columns:
                     where_parts.append("ID = ?")
                     params.append(miscari_id_value)
 
