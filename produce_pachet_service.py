@@ -891,6 +891,8 @@ def _bon_det_field_value(
         "PRET_MEDIU": unit_price,
         "VALOARE": line_value,
         "VAL": line_value,
+        "SUMA_DESC": line_value,
+        "SUMADESC": line_value,
         "COST": line_value,
         "COST_TOTAL": line_value,
         "IS_PROD": 1,
@@ -917,6 +919,8 @@ def _bon_det_field_value(
         return qty_consum
     if upper.startswith("PRET"):
         return unit_price
+    if "SUMA_DESC" in upper:
+        return line_value
     if "VAL" in upper or "COST" in upper:
         return line_value
     if "PROD" in upper and "IS" in upper:
