@@ -1739,7 +1739,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
     bp_id_u_value = miscari_doc_id if miscari_has_id_u else None
     bp_cant_nesti_value = Decimal("0") if is_storno else qty_bp
     bp_pret_value = Decimal("0") if is_storno else pachet.pret_vanz
-    bp_suma_desc_value = _quantize_money(abs(pachet.pret_vanz)) if is_storno else Decimal("0")
+    bp_suma_desc_value = -_quantize_money(abs(pachet.pret_vanz)) if is_storno else Decimal("0")
     if miscari_has_pret and miscari_has_id_u and miscari_has_cant_nesti and miscari_has_suma_desc:
         cursor.execute(
             SQL_QUERIES["insert_miscari_produs_bp_with_pret_and_id_u_and_cant_nesti_and_suma_desc"],
