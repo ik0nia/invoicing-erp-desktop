@@ -195,6 +195,62 @@ INSERT INTO MISCARI (
     SUMA_DESC
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 """.strip(),
+    "insert_miscari_consum_bc_with_id_u_and_suma_desc_and_cant_nesti": """
+INSERT INTO MISCARI (
+    ID,
+    ID_U,
+    DATA,
+    NR_DOC,
+    TIP_DOC,
+    COD_ART,
+    CANTITATE,
+    CANT_NESTI,
+    GESTIUNE,
+    SUMA_DESC
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+""".strip(),
+    "insert_miscari_consum_bc_with_suma_desc_and_cant_nesti": """
+INSERT INTO MISCARI (
+    ID,
+    DATA,
+    NR_DOC,
+    TIP_DOC,
+    COD_ART,
+    CANTITATE,
+    CANT_NESTI,
+    GESTIUNE,
+    SUMA_DESC
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+""".strip(),
+    "insert_miscari_consum_bc_with_id_u_and_suma_desc_and_cant_nesti_and_pret": """
+INSERT INTO MISCARI (
+    ID,
+    ID_U,
+    DATA,
+    NR_DOC,
+    TIP_DOC,
+    COD_ART,
+    CANTITATE,
+    CANT_NESTI,
+    GESTIUNE,
+    PRET,
+    SUMA_DESC
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+""".strip(),
+    "insert_miscari_consum_bc_with_suma_desc_and_cant_nesti_and_pret": """
+INSERT INTO MISCARI (
+    ID,
+    DATA,
+    NR_DOC,
+    TIP_DOC,
+    COD_ART,
+    CANTITATE,
+    CANT_NESTI,
+    GESTIUNE,
+    PRET,
+    SUMA_DESC
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+""".strip(),
     "insert_miscari_produs_bp_with_pret": """
 INSERT INTO MISCARI (
     ID,
@@ -220,6 +276,20 @@ INSERT INTO MISCARI (
     PRET
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 """.strip(),
+    "insert_miscari_produs_bp_with_pret_and_id_u_and_suma_desc": """
+INSERT INTO MISCARI (
+    ID,
+    ID_U,
+    DATA,
+    NR_DOC,
+    TIP_DOC,
+    COD_ART,
+    CANTITATE,
+    GESTIUNE,
+    PRET,
+    SUMA_DESC
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+""".strip(),
     "insert_miscari_produs_bp_with_pret_and_id_u_and_cant_nesti": """
 INSERT INTO MISCARI (
     ID,
@@ -233,6 +303,21 @@ INSERT INTO MISCARI (
     GESTIUNE,
     PRET
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+""".strip(),
+    "insert_miscari_produs_bp_with_pret_and_id_u_and_cant_nesti_and_suma_desc": """
+INSERT INTO MISCARI (
+    ID,
+    ID_U,
+    DATA,
+    NR_DOC,
+    TIP_DOC,
+    COD_ART,
+    CANTITATE,
+    CANT_NESTI,
+    GESTIUNE,
+    PRET,
+    SUMA_DESC
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """.strip(),
     "insert_miscari_produs_bp_without_pret": """
 INSERT INTO MISCARI (
@@ -257,6 +342,33 @@ INSERT INTO MISCARI (
     GESTIUNE,
     PRET
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+""".strip(),
+    "insert_miscari_produs_bp_with_pret_and_suma_desc": """
+INSERT INTO MISCARI (
+    ID,
+    DATA,
+    NR_DOC,
+    TIP_DOC,
+    COD_ART,
+    CANTITATE,
+    GESTIUNE,
+    PRET,
+    SUMA_DESC
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+""".strip(),
+    "insert_miscari_produs_bp_with_pret_and_cant_nesti_and_suma_desc": """
+INSERT INTO MISCARI (
+    ID,
+    DATA,
+    NR_DOC,
+    TIP_DOC,
+    COD_ART,
+    CANTITATE,
+    CANT_NESTI,
+    GESTIUNE,
+    PRET,
+    SUMA_DESC
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """.strip(),
     "insert_miscari_produs_bp_without_pret_and_id_u": """
 INSERT INTO MISCARI (
@@ -893,9 +1005,13 @@ def _pred_det_field_value(
     upper = field_name.upper()
     sign = _operation_sign(pachet)
     qty = Decimal(sign) * abs(pachet.cantitate_produsa)
-    sale_value = Decimal(sign) * abs(pachet.pret_vanz)
+    # Saga storno behavior requested by user:
+    # - PRET follows operation sign
+    # - VALOARE remains positive
+    pret_value = Decimal(sign) * abs(pachet.pret_vanz)
+    sale_value = abs(pachet.pret_vanz)
     cost_total_value = Decimal(sign) * abs(pachet.cost_total)
-    unit_price = sale_value
+    unit_price = pret_value
 
     direct_values = {
         "ID_DOC": pachet.id_doc,
@@ -1442,14 +1558,55 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
     # Business order requested: BC rows first, then BP row.
     for line_no, produs in enumerate(request.produse, start=1):
         qty_consum = abs(produs.cantitate) if is_storno else -abs(produs.cantitate)
-        # Requested rule for MISCARI.BC:
-        # - keep quantity sign as-is
-        # - SUMA_DESC must use opposite sign
-        #   normal BC qty < 0  => SUMA_DESC > 0
-        #   storno BC qty > 0  => SUMA_DESC < 0
-        bc_total_value = -abs(produs.val_produse) if is_storno else abs(produs.val_produse)
+        qty_abs = abs(produs.cantitate)
+        bc_unit_price = Decimal("0")
+        if qty_abs != 0:
+            bc_unit_price = _quantize_money(abs(produs.val_produse) / qty_abs)
+        # Requested storno rule for MISCARI.BC:
+        # - quantities and PRET are positive
+        # - SUMA_DESC must be 0
+        # Normal production keeps BC SUMA_DESC as positive consumption value.
+        bc_total_value = Decimal("0") if is_storno else abs(produs.val_produse)
+        bc_cant_nesti = qty_consum
         current_id_u: int | None = None
-        if miscari_has_id_u and miscari_has_suma_desc:
+        if miscari_has_id_u and miscari_has_suma_desc and miscari_has_cant_nesti and miscari_has_pret:
+            current_id_u = int(next_id_u)
+            next_id_u = current_id_u + 1
+            cursor.execute(
+                SQL_QUERIES["insert_miscari_consum_bc_with_id_u_and_suma_desc_and_cant_nesti_and_pret"],
+                [
+                    miscari_doc_id,
+                    current_id_u,
+                    pachet.data,
+                    nr_doc,
+                    "BC",
+                    produs.cod_articol_db,
+                    qty_consum,
+                    bc_cant_nesti,
+                    pachet.gestiune,
+                    bc_unit_price,
+                    bc_total_value,
+                ],
+            )
+        elif miscari_has_id_u and miscari_has_suma_desc and miscari_has_cant_nesti:
+            current_id_u = int(next_id_u)
+            next_id_u = current_id_u + 1
+            cursor.execute(
+                SQL_QUERIES["insert_miscari_consum_bc_with_id_u_and_suma_desc_and_cant_nesti"],
+                [
+                    miscari_doc_id,
+                    current_id_u,
+                    pachet.data,
+                    nr_doc,
+                    "BC",
+                    produs.cod_articol_db,
+                    qty_consum,
+                    bc_cant_nesti,
+                    pachet.gestiune,
+                    bc_total_value,
+                ],
+            )
+        elif miscari_has_id_u and miscari_has_suma_desc:
             current_id_u = int(next_id_u)
             next_id_u = current_id_u + 1
             cursor.execute(
@@ -1480,6 +1637,37 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                     produs.cod_articol_db,
                     qty_consum,
                     pachet.gestiune,
+                ],
+            )
+        elif miscari_has_suma_desc and miscari_has_cant_nesti and miscari_has_pret:
+            cursor.execute(
+                SQL_QUERIES["insert_miscari_consum_bc_with_suma_desc_and_cant_nesti_and_pret"],
+                [
+                    miscari_doc_id,
+                    pachet.data,
+                    nr_doc,
+                    "BC",
+                    produs.cod_articol_db,
+                    qty_consum,
+                    bc_cant_nesti,
+                    pachet.gestiune,
+                    bc_unit_price,
+                    bc_total_value,
+                ],
+            )
+        elif miscari_has_suma_desc and miscari_has_cant_nesti:
+            cursor.execute(
+                SQL_QUERIES["insert_miscari_consum_bc_with_suma_desc_and_cant_nesti"],
+                [
+                    miscari_doc_id,
+                    pachet.data,
+                    nr_doc,
+                    "BC",
+                    produs.cod_articol_db,
+                    qty_consum,
+                    bc_cant_nesti,
+                    pachet.gestiune,
+                    bc_total_value,
                 ],
             )
         elif miscari_has_suma_desc:
@@ -1543,7 +1731,27 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         bon_det_inserted += 1
 
     bp_id_u_value = miscari_doc_id if miscari_has_id_u else None
-    if miscari_has_pret and miscari_has_id_u and miscari_has_cant_nesti:
+    bp_cant_nesti_value = Decimal("0") if is_storno else qty_bp
+    bp_pret_value = Decimal("0") if is_storno else pachet.pret_vanz
+    bp_suma_desc_value = _quantize_money(abs(pachet.pret_vanz)) if is_storno else Decimal("0")
+    if miscari_has_pret and miscari_has_id_u and miscari_has_cant_nesti and miscari_has_suma_desc:
+        cursor.execute(
+            SQL_QUERIES["insert_miscari_produs_bp_with_pret_and_id_u_and_cant_nesti_and_suma_desc"],
+            [
+                miscari_doc_id,
+                bp_id_u_value,
+                pachet.data,
+                nr_doc,
+                "BP",
+                cod_pachet_db,
+                qty_bp,
+                bp_cant_nesti_value,
+                pachet.gestiune,
+                bp_pret_value,
+                bp_suma_desc_value,
+            ],
+        )
+    elif miscari_has_pret and miscari_has_id_u and miscari_has_cant_nesti:
         cursor.execute(
             SQL_QUERIES["insert_miscari_produs_bp_with_pret_and_id_u_and_cant_nesti"],
             [
@@ -1554,9 +1762,25 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                 "BP",
                 cod_pachet_db,
                 qty_bp,
+                bp_cant_nesti_value,
+                pachet.gestiune,
+                bp_pret_value,
+            ],
+        )
+    elif miscari_has_pret and miscari_has_id_u and miscari_has_suma_desc:
+        cursor.execute(
+            SQL_QUERIES["insert_miscari_produs_bp_with_pret_and_id_u_and_suma_desc"],
+            [
+                miscari_doc_id,
+                bp_id_u_value,
+                pachet.data,
+                nr_doc,
+                "BP",
+                cod_pachet_db,
                 qty_bp,
                 pachet.gestiune,
-                pachet.pret_vanz,
+                bp_pret_value,
+                bp_suma_desc_value,
             ],
         )
     elif miscari_has_pret and miscari_has_id_u:
@@ -1571,7 +1795,23 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                 cod_pachet_db,
                 qty_bp,
                 pachet.gestiune,
-                pachet.pret_vanz,
+                bp_pret_value,
+            ],
+        )
+    elif miscari_has_pret and miscari_has_cant_nesti and miscari_has_suma_desc:
+        cursor.execute(
+            SQL_QUERIES["insert_miscari_produs_bp_with_pret_and_cant_nesti_and_suma_desc"],
+            [
+                miscari_doc_id,
+                pachet.data,
+                nr_doc,
+                "BP",
+                cod_pachet_db,
+                qty_bp,
+                bp_cant_nesti_value,
+                pachet.gestiune,
+                bp_pret_value,
+                bp_suma_desc_value,
             ],
         )
     elif miscari_has_pret and miscari_has_cant_nesti:
@@ -1584,9 +1824,24 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                 "BP",
                 cod_pachet_db,
                 qty_bp,
+                bp_cant_nesti_value,
+                pachet.gestiune,
+                bp_pret_value,
+            ],
+        )
+    elif miscari_has_pret and miscari_has_suma_desc:
+        cursor.execute(
+            SQL_QUERIES["insert_miscari_produs_bp_with_pret_and_suma_desc"],
+            [
+                miscari_doc_id,
+                pachet.data,
+                nr_doc,
+                "BP",
+                cod_pachet_db,
                 qty_bp,
                 pachet.gestiune,
-                pachet.pret_vanz,
+                bp_pret_value,
+                bp_suma_desc_value,
             ],
         )
     elif miscari_has_pret:
@@ -1600,7 +1855,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                 cod_pachet_db,
                 qty_bp,
                 pachet.gestiune,
-                pachet.pret_vanz,
+                bp_pret_value,
             ],
         )
     elif miscari_has_id_u and miscari_has_cant_nesti:
@@ -1614,7 +1869,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                 "BP",
                 cod_pachet_db,
                 qty_bp,
-                qty_bp,
+                bp_cant_nesti_value,
                 pachet.gestiune,
             ],
         )
@@ -1642,7 +1897,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                 "BP",
                 cod_pachet_db,
                 qty_bp,
-                qty_bp,
+                bp_cant_nesti_value,
                 pachet.gestiune,
             ],
         )
