@@ -1569,7 +1569,13 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         bc_total_value = Decimal("0") if is_storno else abs(produs.val_produse)
         bc_cant_nesti = qty_consum
         current_id_u: int | None = None
-        if miscari_has_id_u and miscari_has_suma_desc and miscari_has_cant_nesti and miscari_has_pret:
+        if (
+            is_storno
+            and miscari_has_id_u
+            and miscari_has_suma_desc
+            and miscari_has_cant_nesti
+            and miscari_has_pret
+        ):
             current_id_u = int(next_id_u)
             next_id_u = current_id_u + 1
             cursor.execute(
@@ -1588,7 +1594,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                     bc_total_value,
                 ],
             )
-        elif miscari_has_id_u and miscari_has_suma_desc and miscari_has_cant_nesti:
+        elif is_storno and miscari_has_id_u and miscari_has_suma_desc and miscari_has_cant_nesti:
             current_id_u = int(next_id_u)
             next_id_u = current_id_u + 1
             cursor.execute(
@@ -1639,7 +1645,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                     pachet.gestiune,
                 ],
             )
-        elif miscari_has_suma_desc and miscari_has_cant_nesti and miscari_has_pret:
+        elif is_storno and miscari_has_suma_desc and miscari_has_cant_nesti and miscari_has_pret:
             cursor.execute(
                 SQL_QUERIES["insert_miscari_consum_bc_with_suma_desc_and_cant_nesti_and_pret"],
                 [
@@ -1655,7 +1661,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                     bc_total_value,
                 ],
             )
-        elif miscari_has_suma_desc and miscari_has_cant_nesti:
+        elif is_storno and miscari_has_suma_desc and miscari_has_cant_nesti:
             cursor.execute(
                 SQL_QUERIES["insert_miscari_consum_bc_with_suma_desc_and_cant_nesti"],
                 [
