@@ -660,22 +660,42 @@ def _find_existing_document(cursor: Any, pachet: PachetInput) -> dict[str, Any] 
     Returns existing nr_doc and pachet code when found.
     Raises if document looks partially imported (only BC or only BP).
     """
-    # MISCARI.ID is generated as MAX(ID)+1.
-    # For idempotency we first try PRED_DET.ID_DOC (payload id_doc), then
-    # fall back to legacy rows where ID_UNIC previously stored payload id_doc.
+    pred_fields = _get_relation_fields(cursor, "PRED_DET")
+    if not pred_fields:
+        return None
+    pred_columns = {str(field["name"]).upper() for field in pred_fields}
+
+    nr_column_name: str | None = None
+    if "NR_DOC" in pred_columns:
+        nr_column_name = "NR_DOC"
+    elif "NR" in pred_columns:
+        # Some schemas store document number in NR instead of NR_DOC.
+        nr_column_name = "NR"
+
+    candidate_id_columns: list[str] = []
+    if "ID_DOC" in pred_columns:
+        candidate_id_columns.append("ID_DOC")
+    if "ID_UNIC" in pred_columns:
+        # Backward compatibility for older imports where ID_UNIC stored payload id_doc.
+        candidate_id_columns.append("ID_UNIC")
+
+    if nr_column_name is None or not candidate_id_columns:
+        return None
+
     pred_row = None
-    try:
-        cursor.execute(SQL_QUERIES["select_pred_det_existing_nr_doc_by_id_doc"], [pachet.id_doc])
+    for id_column_name in candidate_id_columns:
+        cursor.execute(
+            (
+                f"SELECT FIRST 1 {_quote_identifier(nr_column_name)} "
+                f"FROM {_quote_identifier('PRED_DET')} "
+                f"WHERE {_quote_identifier(id_column_name)} = ? "
+                f"ORDER BY {_quote_identifier(nr_column_name)} DESC"
+            ),
+            [pachet.id_doc],
+        )
         pred_row = cursor.fetchone()
-    except Exception:
-        pred_row = None
-    if not pred_row:
-        # Backward compatibility for older imports where ID_UNIC was mapped to payload id_doc.
-        try:
-            cursor.execute(SQL_QUERIES["select_pred_det_existing_nr_doc_by_id_unic"], [pachet.id_doc])
-            pred_row = cursor.fetchone()
-        except Exception:
-            pred_row = None
+        if pred_row:
+            break
 
     if not pred_row:
         return None
