@@ -601,7 +601,8 @@ def _build_database_target(settings: FirebirdConnectionSettings) -> str:
 
     host = settings.host.strip()
     if host:
-        return f"{host}/{settings.port}:{db_path}"
+        # Firebird server-client format: host:port/database_path
+        return f"{host}:{settings.port}/{db_path}"
     return db_path
 
 

@@ -246,7 +246,8 @@ class IntegrationService:
 
         host = config.db_host.strip()
         if host:
-            return f"{host}/{config.db_port}:{db_path}"
+            # Firebird server-client format: host:port/database_path
+            return f"{host}:{config.db_port}/{db_path}"
         return db_path
 
     def _configure_client_library(self, config: AppConfig) -> None:
