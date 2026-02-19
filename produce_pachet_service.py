@@ -1004,6 +1004,7 @@ def _pred_det_field_value(
 ) -> Any | None:
     upper = field_name.upper()
     sign = _operation_sign(pachet)
+    pred_det_cod = f"PAC{pachet.id_doc}"
     qty = Decimal(sign) * abs(pachet.cantitate_produsa)
     # Saga storno behavior requested by user:
     # - PRET follows operation sign
@@ -1068,11 +1069,12 @@ def _pred_det_field_value(
     if "COD" in upper:
         if any(key in upper for key in ("COMP", "MAT", "MATER", "MP")):
             return first_produs.cod_articol_db
+        # Requested rule: in PRED_DET, package code is PAC + payload id_doc.
         if any(key in upper for key in ("PACH", "PF", "PRODUS")):
-            return cod_pachet_db
+            return pred_det_cod
         if upper in {"COD_ARTICOL", "COD_ART"}:
-            return cod_pachet_db
-        return cod_pachet_db
+            return pred_det_cod
+        return pred_det_cod
 
     if "CONSUM" in upper or upper.endswith("_COST") or upper.startswith("COST_"):
         return cost_total_value
