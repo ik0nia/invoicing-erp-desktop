@@ -724,10 +724,13 @@ def ensurePachetInArticole(cursor: Any, pachet: PachetInput, allow_create: bool 
             f"(denumire='{pachet.denumire}')."
         )
 
-    cursor.execute(SQL_QUERIES["select_max_articole_cod8"])
-    max_code = int(cursor.fetchone()[0] or 0)
-    code8 = f"{max_code + 1:08d}"
-    code_db = code8.ljust(16)
+    code_core = f"PAC{pachet.id_doc}"
+    if len(code_core) > 16:
+        raise RuntimeError(
+            "Cannot create package article code in ARTICOLE because PAC+id_doc exceeds 16 characters "
+            f"(id_doc={pachet.id_doc}, generated='{code_core}')."
+        )
+    code_db = code_core.ljust(16)
     um = "BUC"
 
     try:
@@ -1004,7 +1007,6 @@ def _pred_det_field_value(
 ) -> Any | None:
     upper = field_name.upper()
     sign = _operation_sign(pachet)
-    pred_det_cod = f"PAC{pachet.id_doc}"
     qty = Decimal(sign) * abs(pachet.cantitate_produsa)
     # Saga storno behavior requested by user:
     # - PRET follows operation sign
@@ -1069,12 +1071,11 @@ def _pred_det_field_value(
     if "COD" in upper:
         if any(key in upper for key in ("COMP", "MAT", "MATER", "MP")):
             return first_produs.cod_articol_db
-        # Requested rule: in PRED_DET, package code is PAC + payload id_doc.
         if any(key in upper for key in ("PACH", "PF", "PRODUS")):
-            return pred_det_cod
+            return cod_pachet_db
         if upper in {"COD_ARTICOL", "COD_ART"}:
-            return pred_det_cod
-        return pred_det_cod
+            return cod_pachet_db
+        return cod_pachet_db
 
     if "CONSUM" in upper or upper.endswith("_COST") or upper.startswith("COST_"):
         return cost_total_value
