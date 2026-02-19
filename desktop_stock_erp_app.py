@@ -239,16 +239,32 @@ class IntegrationService:
             raise RuntimeError(f"Missing dependency 'firebird-driver': {FIREBIRD_IMPORT_ERROR}")
 
     @staticmethod
-    def _build_db_target(config: AppConfig) -> str:
+    def _build_db_targets(config: AppConfig) -> list[str]:
         db_path = config.db_path.strip()
         if not db_path:
             raise ValueError("Database file path is empty.")
 
         host = config.db_host.strip()
-        if host:
-            # Firebird server-client format: host:port/database_path
-            return f"{host}:{config.db_port}/{db_path}"
-        return db_path
+        if not host:
+            return [db_path]
+
+        candidates = [
+            # Preferred by current UI request.
+            f"{host}:{config.db_port}/{db_path}",
+            # Common Firebird DSN variant used by many clients.
+            f"{host}/{config.db_port}:{db_path}",
+            # Host + database alias/path with server-side default port.
+            f"{host}:{db_path}",
+        ]
+        targets: list[str] = []
+        for candidate in candidates:
+            if candidate not in targets:
+                targets.append(candidate)
+        return targets
+
+    @staticmethod
+    def _build_db_target(config: AppConfig) -> str:
+        return IntegrationService._build_db_targets(config)[0]
 
     def _configure_client_library(self, config: AppConfig) -> None:
         library_raw = config.fb_client_library_path.strip()
@@ -268,26 +284,37 @@ class IntegrationService:
             self._dll_dir_handles.append(handle)
 
     def _connect(self, config: AppConfig):
-        target = self._build_db_target(config)
-        self.log(f"Connecting to Firebird at: {target}")
         self._configure_client_library(config)
-        try:
-            return fb_connect(
-                database=target,
-                user=config.db_user.strip(),
-                password=config.db_password,
-                charset=config.db_charset.strip() or "UTF8",
-            )
-        except Exception as exc:  # pylint: disable=broad-except
-            message = str(exc)
-            lowered = message.lower()
-            if "client library" in lowered or "fbclient" in lowered:
-                raise RuntimeError(
-                    "Firebird client library is missing. "
-                    "Set 'Firebird client library (fbclient.dll)' in Firebird tab "
-                    "or install Firebird client and add it to PATH."
-                ) from exc
-            raise
+        targets = self._build_db_targets(config)
+        last_error: Exception | None = None
+        for index, target in enumerate(targets, start=1):
+            self.log(f"Connecting to Firebird at: {target} (attempt {index}/{len(targets)})")
+            try:
+                return fb_connect(
+                    database=target,
+                    user=config.db_user.strip(),
+                    password=config.db_password,
+                    charset=config.db_charset.strip() or "UTF8",
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                message = str(exc)
+                lowered = message.lower()
+                if "client library" in lowered or "fbclient" in lowered:
+                    raise RuntimeError(
+                        "Firebird client library is missing. "
+                        "Set 'Firebird client library (fbclient.dll)' in Firebird tab "
+                        "or install Firebird client and add it to PATH."
+                    ) from exc
+                last_error = exc
+                if index < len(targets):
+                    self.log(
+                        "Firebird connection attempt failed, trying next target format: "
+                        f"{message}"
+                    )
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Unable to build Firebird connection target.")
 
     def _fetch_json_from_api(
         self,

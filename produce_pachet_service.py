@@ -594,16 +594,32 @@ def normalizeCodArticol(cod: Any) -> str:
     return code8.ljust(16)
 
 
-def _build_database_target(settings: FirebirdConnectionSettings) -> str:
+def _build_database_targets(settings: FirebirdConnectionSettings) -> list[str]:
     db_path = settings.database_path.strip()
     if not db_path:
         raise ValueError("database_path is required.")
 
     host = settings.host.strip()
-    if host:
-        # Firebird server-client format: host:port/database_path
-        return f"{host}:{settings.port}/{db_path}"
-    return db_path
+    if not host:
+        return [db_path]
+
+    candidates = [
+        # Preferred by current UI request.
+        f"{host}:{settings.port}/{db_path}",
+        # Common Firebird DSN variant used by many clients.
+        f"{host}/{settings.port}:{db_path}",
+        # Host + database alias/path with server-side default port.
+        f"{host}:{db_path}",
+    ]
+    targets: list[str] = []
+    for candidate in candidates:
+        if candidate not in targets:
+            targets.append(candidate)
+    return targets
+
+
+def _build_database_target(settings: FirebirdConnectionSettings) -> str:
+    return _build_database_targets(settings)[0]
 
 
 def _configure_firebird_client_library(settings: FirebirdConnectionSettings) -> None:
@@ -1980,31 +1996,40 @@ def producePachet(
     _ensure_firebird_available()
     _configure_firebird_client_library(db_settings)
     request = validate_produce_pachet_input(payload)
-    db_target = _build_database_target(db_settings)
+    db_targets = _build_database_targets(db_settings)
 
     last_error: Exception | None = None
-    for attempt in range(2):
-        connection = fb_connect(
-            database=db_target,
-            user=db_settings.user,
-            password=db_settings.password,
-            charset=db_settings.charset,
-        )
-        try:
-            cursor_raw = connection.cursor()
-            cursor = _TracingCursor(cursor_raw, sql_trace) if sql_trace is not None else cursor_raw
-            result = _execute_produce_pachet_once(cursor, request)
-            connection.commit()
-            return result
-        except Exception as exc:
-            connection.rollback()
-            last_error = exc
-            # Rare case: NR_DOC collision under concurrency. Retry once.
-            if _is_unique_violation(exc) and attempt == 0:
-                continue
-            raise
-        finally:
-            connection.close()
+    for db_target in db_targets:
+        for attempt in range(2):
+            connection: Any | None = None
+            try:
+                connection = fb_connect(
+                    database=db_target,
+                    user=db_settings.user,
+                    password=db_settings.password,
+                    charset=db_settings.charset,
+                )
+            except Exception as exc:
+                last_error = exc
+                # Try next target format when connection itself cannot be established.
+                break
+
+            try:
+                try:
+                    cursor_raw = connection.cursor()
+                    cursor = _TracingCursor(cursor_raw, sql_trace) if sql_trace is not None else cursor_raw
+                    result = _execute_produce_pachet_once(cursor, request)
+                    connection.commit()
+                    return result
+                except Exception as exc:
+                    connection.rollback()
+                    last_error = exc
+                    # Rare case: NR_DOC collision under concurrency. Retry once.
+                    if _is_unique_violation(exc) and attempt == 0:
+                        continue
+                    raise
+            finally:
+                connection.close()
 
     if last_error is not None:
         raise last_error
