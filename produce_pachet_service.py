@@ -1627,14 +1627,15 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
     miscari_base_value = miscari_doc_id
     maxid_value = miscari_doc_id
     if miscari_has_id_u:
-        # Requested rule with atomic generator value:
-        # - MISCARI.ID = GETIDS value
-        # - first BC ID_U = ID + 1
-        next_id_u = miscari_doc_id + 1
+        # Requested rule with atomic generator values:
+        # - MISCARI.ID = GETIDS value (document id)
+        # - each BC ID_U = independent GETIDS value
+        # - BP ID_U = document id
         id_u_start = miscari_doc_id
+        miscari_id_u_values: list[int] = [miscari_doc_id]
     else:
-        next_id_u = None
         id_u_start = None
+        miscari_id_u_values = []
     bon_det_insertable_fields = _get_bon_det_insertable_fields(cursor, bon_table_name)
     bon_det_has_id_u_column = any(
         field["name"].upper() == "ID_U" for field in bon_det_insertable_fields
@@ -1675,7 +1676,11 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         # Normal production keeps BC SUMA_DESC as positive consumption value.
         bc_total_value = Decimal("0") if is_storno else abs(produs.val_produse)
         bc_cant_nesti = qty_consum
-        current_id_u: int | None = None
+        current_id_u: int | None = (
+            _get_next_getids_value(cursor) if miscari_has_id_u else None
+        )
+        if current_id_u is not None:
+            miscari_id_u_values.append(current_id_u)
         if (
             is_storno
             and miscari_has_id_u
@@ -1683,8 +1688,6 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
             and miscari_has_cant_nesti
             and miscari_has_pret
         ):
-            current_id_u = int(next_id_u)
-            next_id_u = current_id_u + 1
             cursor.execute(
                 SQL_QUERIES["insert_miscari_consum_bc_with_id_u_and_suma_desc_and_cant_nesti_and_pret"],
                 [
@@ -1702,8 +1705,6 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                 ],
             )
         elif is_storno and miscari_has_id_u and miscari_has_suma_desc and miscari_has_cant_nesti:
-            current_id_u = int(next_id_u)
-            next_id_u = current_id_u + 1
             cursor.execute(
                 SQL_QUERIES["insert_miscari_consum_bc_with_id_u_and_suma_desc_and_cant_nesti"],
                 [
@@ -1720,8 +1721,6 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                 ],
             )
         elif miscari_has_id_u and miscari_has_suma_desc:
-            current_id_u = int(next_id_u)
-            next_id_u = current_id_u + 1
             cursor.execute(
                 SQL_QUERIES["insert_miscari_consum_bc_with_id_u_and_suma_desc"],
                 [
@@ -1737,8 +1736,6 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
                 ],
             )
         elif miscari_has_id_u:
-            current_id_u = int(next_id_u)
-            next_id_u = current_id_u + 1
             cursor.execute(
                 SQL_QUERIES["insert_miscari_consum_bc_with_id_u"],
                 [
@@ -2044,7 +2041,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
             [qty_bp, cod_pachet_db, cod_pachet_db],
         )
         articole_stoc_updated = True
-    id_u_end = (int(next_id_u) - 1) if next_id_u is not None else None
+    id_u_end = max(miscari_id_u_values) if miscari_id_u_values else None
 
     return {
         "success": True,

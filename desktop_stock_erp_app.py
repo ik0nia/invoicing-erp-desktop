@@ -548,8 +548,6 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
             if "ID_U" in miscari_columns:
                 id_u_checked = True
                 expected_total_lines = expected_bc_lines + 1
-                expected_id_u_start = produce_result.get("idUStart")
-                expected_id_u_end = produce_result.get("idUEnd")
                 cursor.execute(
                     """
 SELECT MIN(ID_U), MAX(ID_U), COUNT(DISTINCT ID_U)
@@ -568,18 +566,30 @@ WHERE ID = ?
                     actual_id_u_max = int(max_id_u)
                 if distinct_count is not None:
                     distinct_id_u = int(distinct_count)
+                cursor.execute(
+                    """
+SELECT
+    COALESCE(SUM(CASE WHEN TIP_DOC = 'BP' AND ID_U = ? THEN 1 ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN TIP_DOC = 'BP' AND ID_U IS NULL THEN 1 ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN TIP_DOC = 'BC' AND ID_U IS NULL THEN 1 ELSE 0 END), 0)
+FROM MISCARI
+WHERE ID = ?
+  AND DATA = ?
+  AND NR_DOC = ?
+  AND TIP_DOC IN ('BC', 'BP')
+""".strip(),
+                    [miscari_id_value, miscari_id_value, data_value, nr_doc_value],
+                )
+                bp_id_u_matches_id, bp_id_u_null_count, bc_id_u_null_count = cursor.fetchone()
+                bp_id_u_matches_id_int = int(bp_id_u_matches_id or 0)
+                bp_id_u_null_count_int = int(bp_id_u_null_count or 0)
+                bc_id_u_null_count_int = int(bc_id_u_null_count or 0)
                 id_u_ok = (
                     distinct_id_u == expected_total_lines
-                    and actual_id_u_min is not None
-                    and actual_id_u_max is not None
-                    and (actual_id_u_max - actual_id_u_min + 1) == expected_total_lines
+                    and bp_id_u_matches_id_int == 1
+                    and bp_id_u_null_count_int == 0
+                    and bc_id_u_null_count_int == 0
                 )
-                if expected_id_u_start not in (None, "") and expected_id_u_end not in (None, ""):
-                    id_u_ok = (
-                        id_u_ok
-                        and actual_id_u_min == int(expected_id_u_start)
-                        and actual_id_u_max == int(expected_id_u_end)
-                    )
 
             cursor.execute(
                 """
@@ -706,14 +716,13 @@ WHERE TRIM(RDB$RELATION_NAME) = ?
             bon_det_actual_id_u_min: int | None = None
             bon_det_actual_id_u_max: int | None = None
             bon_det_distinct_id_u: int | None = None
+            bon_det_matched_id_u_count: int | None = None
             bon_det_id_u_ok = True
             if "ID_U" in bon_det_columns:
                 bon_det_id_u_checked = True
                 if not bon_det_checked:
                     bon_det_id_u_ok = False
                 else:
-                    expected_bon_det_id_u_start = produce_result.get("bonDetIdUStart")
-                    expected_bon_det_id_u_end = produce_result.get("bonDetIdUEnd")
                     cursor.execute(
                         f"""
 SELECT MIN(ID_U), MAX(ID_U), COUNT(DISTINCT ID_U)
@@ -729,21 +738,28 @@ WHERE {bon_det_where_sql}
                         bon_det_actual_id_u_max = int(max_id_u)
                     if distinct_count is not None:
                         bon_det_distinct_id_u = int(distinct_count)
+                    cursor.execute(
+                        f"""
+SELECT COUNT(DISTINCT b.ID_U)
+FROM {bon_table_name} b
+WHERE {bon_det_where_sql}
+  AND EXISTS (
+      SELECT 1
+      FROM MISCARI m
+      WHERE m.ID = ?
+        AND m.DATA = ?
+        AND m.NR_DOC = ?
+        AND m.TIP_DOC = 'BC'
+        AND m.ID_U = b.ID_U
+  )
+""".strip(),
+                        bon_det_where_params + [miscari_id_value, data_value, nr_doc_value],
+                    )
+                    bon_det_matched_id_u_count = int(cursor.fetchone()[0] or 0)
                     bon_det_id_u_ok = (
                         bon_det_distinct_id_u == expected_bon_det
-                        and bon_det_actual_id_u_min is not None
-                        and bon_det_actual_id_u_max is not None
-                        and (bon_det_actual_id_u_max - bon_det_actual_id_u_min + 1) == expected_bon_det
+                        and bon_det_matched_id_u_count == expected_bon_det
                     )
-                    if (
-                        expected_bon_det_id_u_start not in (None, "")
-                        and expected_bon_det_id_u_end not in (None, "")
-                    ):
-                        bon_det_id_u_ok = (
-                            bon_det_id_u_ok
-                            and bon_det_actual_id_u_min == int(expected_bon_det_id_u_start)
-                            and bon_det_actual_id_u_max == int(expected_bon_det_id_u_end)
-                        )
         finally:
             connection.close()
 
@@ -809,6 +825,7 @@ WHERE {bon_det_where_sql}
             "actual_bon_det": actual_bon_det,
             "bon_det_id_u_checked": bon_det_id_u_checked,
             "bon_det_distinct_id_u": bon_det_distinct_id_u,
+            "bon_det_matched_id_u_count": bon_det_matched_id_u_count,
             "bon_det_actual_id_u_min": bon_det_actual_id_u_min,
             "bon_det_actual_id_u_max": bon_det_actual_id_u_max,
             "bon_table": bon_table_name,
