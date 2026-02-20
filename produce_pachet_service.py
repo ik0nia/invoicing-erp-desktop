@@ -108,9 +108,14 @@ FROM RDB$RELATION_FIELDS
 WHERE TRIM(RDB$RELATION_NAME) = ?
   AND TRIM(RDB$FIELD_NAME) = ?
 """.strip(),
-    "select_maxid_function": """
-SELECT MAXID() AS VALUE_MAXID
-FROM RDB$DATABASE
+    "check_generator_exists": """
+SELECT COUNT(*)
+FROM RDB$GENERATORS
+WHERE TRIM(RDB$GENERATOR_NAME) = ?
+""".strip(),
+    "select_getids_value": """
+SELECT FIRST 1 mIdNumar
+FROM GETIDS
 """.strip(),
     "select_max_miscari_id_u": """
 SELECT COALESCE(MAX(ID_U), 0)
@@ -134,6 +139,10 @@ ORDER BY rf.RDB$FIELD_POSITION
 """.strip(),
     "select_max_pred_det_nr": """
 SELECT COALESCE(MAX(NR), 0)
+FROM PRED_DET
+""".strip(),
+    "select_max_pred_det_nr_doc": """
+SELECT COALESCE(MAX(NR_DOC), 0)
 FROM PRED_DET
 """.strip(),
     "select_max_bon_det_id_u": """
@@ -801,6 +810,28 @@ def getNextNrDoc(cursor: Any, data_doc: date) -> int:
     return max_nr + 1
 
 
+def _get_next_document_nr(cursor: Any, data_doc: date) -> int:
+    """
+    Return the document number used by both MISCARI.NR_DOC and PRED_DET.NR.
+
+    Preferred source:
+    - PRED_DET.NR (MAX + 1), per requested business rule.
+    Fallback:
+    - PRED_DET.NR_DOC (MAX + 1), if NR is unavailable.
+    - legacy MISCARI BP counter by date, when PRED_DET has no number column.
+    """
+    pred_fields = _get_relation_fields(cursor, "PRED_DET")
+    pred_columns = {str(field["name"]).upper() for field in pred_fields}
+
+    if "NR" in pred_columns:
+        return _get_next_pred_det_nr(cursor)
+    if "NR_DOC" in pred_columns:
+        cursor.execute(SQL_QUERIES["select_max_pred_det_nr_doc"])
+        current_max = int(cursor.fetchone()[0] or 0)
+        return current_max + 1
+    return getNextNrDoc(cursor, data_doc)
+
+
 def _find_existing_document(cursor: Any, pachet: PachetInput) -> dict[str, Any] | None:
     """
     Detect already imported document for same (ID_DOC, DATA).
@@ -918,12 +949,15 @@ def _articole_has_stoc_column(cursor: Any) -> bool:
     return int(cursor.fetchone()[0] or 0) > 0
 
 
-def _get_maxid_value(cursor: Any) -> int:
-    cursor.execute(SQL_QUERIES["select_maxid_function"])
+def _get_next_getids_value(cursor: Any) -> int:
+    cursor.execute(SQL_QUERIES["select_getids_value"])
     row = cursor.fetchone()
     if not row:
-        return 0
-    return int(row[0] or 0)
+        raise RuntimeError("GETIDS did not return any row.")
+    value = int(row[0] or 0)
+    if value <= 0:
+        raise RuntimeError(f"GETIDS returned invalid value: {value}")
+    return value
 
 
 def _get_next_miscari_id_u(cursor: Any) -> int:
@@ -954,6 +988,20 @@ def _get_next_bon_table_pk(cursor: Any, bon_table_name: str) -> int:
     cursor.execute(f"SELECT COALESCE(MAX(PK), 0) FROM {_quote_identifier(bon_table_name)}")
     current_max = int(cursor.fetchone()[0] or 0)
     return current_max + 1
+
+
+def _is_bon_table_pk_generator_managed(cursor: Any, bon_table_name: str) -> bool:
+    normalized = str(bon_table_name).strip().upper()
+    if not normalized:
+        return False
+    candidates = [f"GEN_{normalized}_PK"]
+    if normalized == "BON_DET":
+        candidates.append("GEN_BON_DET_PK")
+    for generator_name in dict.fromkeys(candidates):
+        cursor.execute(SQL_QUERIES["check_generator_exists"], [generator_name])
+        if int(cursor.fetchone()[0] or 0) > 0:
+            return True
+    return False
 
 
 def _resolve_bon_consumption_table(cursor: Any) -> str:
@@ -1242,6 +1290,7 @@ def _insert_single_bon_det_row(
     line_no: int,
     bon_det_id_u: int | None,
     bon_det_pk: int | None,
+    skip_pk: bool,
     is_storno: bool,
     articol_cache: dict[str, tuple[str, str]],
 ) -> None:
@@ -1266,6 +1315,9 @@ def _insert_single_bon_det_row(
     missing_required: list[str] = []
     for field in insertable_fields:
         field_name = field["name"]
+        if skip_pk and str(field_name).upper() == "PK":
+            # PK is expected to be populated by DB trigger/generator.
+            continue
         value = _bon_det_field_value(
             field_name=field_name,
             pachet=pachet,
@@ -1316,8 +1368,13 @@ def _insert_bon_det_rows(
     insertable_fields = _get_bon_det_insertable_fields(cursor, bon_table_name)
     has_id_u_column = any(field["name"].upper() == "ID_U" for field in insertable_fields)
     has_pk_column = any(field["name"].upper() == "PK" for field in insertable_fields)
+    skip_pk = has_pk_column and _is_bon_table_pk_generator_managed(cursor, bon_table_name)
     next_id_u = _get_next_bon_det_id_u(cursor, bon_table_name) if has_id_u_column else None
-    next_pk = _get_next_bon_table_pk(cursor, bon_table_name) if has_pk_column else None
+    next_pk = (
+        _get_next_bon_table_pk(cursor, bon_table_name)
+        if has_pk_column and not skip_pk
+        else None
+    )
     id_u_start = next_id_u if next_id_u is not None else None
     inserted_rows = 0
     pachet = request.pachet
@@ -1343,6 +1400,7 @@ def _insert_bon_det_rows(
             line_no=line_no,
             bon_det_id_u=current_id_u,
             bon_det_pk=current_pk,
+            skip_pk=skip_pk,
             is_storno=is_storno,
             articol_cache=articol_cache,
         )
@@ -1419,6 +1477,7 @@ def _insert_pred_det_rows(
     cod_pachet_db: str,
     miscari_doc_id: int,
     nr_doc: int,
+    pred_det_nr_value: int | None = None,
 ) -> int:
     fields = _get_relation_fields(cursor, "PRED_DET")
     if not fields:
@@ -1434,7 +1493,13 @@ def _insert_pred_det_rows(
     first_produs = request.produse[0]
     line_no = 1
     has_nr_column = any(field["name"].upper() == "NR" for field in insertable_fields)
-    pred_det_nr = _get_next_pred_det_nr(cursor) if has_nr_column else None
+    pred_det_nr = None
+    if has_nr_column:
+        pred_det_nr = (
+            int(pred_det_nr_value)
+            if pred_det_nr_value is not None
+            else _get_next_pred_det_nr(cursor)
+        )
     columns: list[str] = []
     values: list[Any] = []
     missing_required: list[str] = []
@@ -1552,18 +1617,19 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         }
 
     cod_pachet_db = ensurePachetInArticole(cursor, pachet, allow_create=not is_storno)
-    nr_doc = getNextNrDoc(cursor, pachet.data)
+    nr_doc = _get_next_document_nr(cursor, pachet.data)
     miscari_has_pret = _miscari_has_pret_column(cursor)
     miscari_has_id_u = _miscari_has_id_u_column(cursor)
     miscari_has_suma_desc = _miscari_has_suma_desc_column(cursor)
     miscari_has_cant_nesti = _miscari_has_cant_nesti_column(cursor)
-    maxid_value = _get_maxid_value(cursor)
-    miscari_base_value = int(maxid_value)
-    miscari_doc_id = miscari_base_value + 1
+    getids_value = _get_next_getids_value(cursor)
+    miscari_doc_id = int(getids_value)
+    miscari_base_value = miscari_doc_id
+    maxid_value = miscari_doc_id
     if miscari_has_id_u:
-        # Requested rule:
-        # - MISCARI.ID = MAXID() + 1
-        # - first BC ID_U = MAXID() + 2
+        # Requested rule with atomic generator value:
+        # - MISCARI.ID = GETIDS value
+        # - first BC ID_U = ID + 1
         next_id_u = miscari_doc_id + 1
         id_u_start = miscari_doc_id
     else:
@@ -1576,13 +1642,18 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
     bon_det_has_pk_column = any(
         field["name"].upper() == "PK" for field in bon_det_insertable_fields
     )
+    bon_det_skip_pk = (
+        bon_det_has_pk_column and _is_bon_table_pk_generator_managed(cursor, bon_table_name)
+    )
     next_bon_det_id_u = (
         _get_next_bon_det_id_u(cursor, bon_table_name)
         if bon_det_has_id_u_column and not miscari_has_id_u
         else None
     )
     next_bon_det_pk = (
-        _get_next_bon_table_pk(cursor, bon_table_name) if bon_det_has_pk_column else None
+        _get_next_bon_table_pk(cursor, bon_table_name)
+        if bon_det_has_pk_column and not bon_det_skip_pk
+        else None
     )
     bon_det_id_u_start: int | None = None
     bon_det_id_u_end: int | None = None
@@ -1767,6 +1838,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
             line_no=line_no,
             bon_det_id_u=current_bon_det_id_u,
             bon_det_pk=current_bon_det_pk,
+            skip_pk=bon_det_skip_pk,
             is_storno=is_storno,
             articol_cache=bon_det_articol_cache,
         )
@@ -1963,6 +2035,7 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         cod_pachet_db=cod_pachet_db,
         miscari_doc_id=miscari_doc_id,
         nr_doc=nr_doc,
+        pred_det_nr_value=nr_doc,
     )
     articole_stoc_updated = False
     if _articole_has_stoc_column(cursor):
