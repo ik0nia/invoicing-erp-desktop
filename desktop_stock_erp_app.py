@@ -248,14 +248,30 @@ class IntegrationService:
         if not host:
             return [db_path]
 
-        candidates = [
-            # Preferred by current UI request.
-            f"{host}:{config.db_port}/{db_path}",
-            # Common Firebird DSN variant used by many clients.
-            f"{host}/{config.db_port}:{db_path}",
-            # Host + database alias/path with server-side default port.
-            f"{host}:{db_path}",
-        ]
+        is_windows_path = (
+            len(db_path) >= 2
+            and db_path[1] == ":"
+            and db_path[0].isalpha()
+        )
+
+        if is_windows_path:
+            candidates = [
+                # Best match for Windows absolute paths in classic Firebird DSN.
+                f"{host}/{config.db_port}:{db_path}",
+                # Alternate modern format supported by some drivers/servers.
+                f"{host}:{config.db_port}/{db_path}",
+                # Host + database alias/path with server-side default port.
+                f"{host}:{db_path}",
+            ]
+        else:
+            candidates = [
+                # Preferred format for non-Windows absolute paths and aliases.
+                f"{host}:{config.db_port}/{db_path}",
+                # Classic fallback.
+                f"{host}/{config.db_port}:{db_path}",
+                # Host + database alias/path with server-side default port.
+                f"{host}:{db_path}",
+            ]
         targets: list[str] = []
         for candidate in candidates:
             if candidate not in targets:
