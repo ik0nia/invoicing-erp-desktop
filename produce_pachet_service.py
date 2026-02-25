@@ -1477,7 +1477,6 @@ def _insert_pred_det_rows(
     cod_pachet_db: str,
     miscari_doc_id: int,
     nr_doc: int,
-    pred_det_nr_value: int | None = None,
 ) -> int:
     fields = _get_relation_fields(cursor, "PRED_DET")
     if not fields:
@@ -1493,13 +1492,7 @@ def _insert_pred_det_rows(
     first_produs = request.produse[0]
     line_no = 1
     has_nr_column = any(field["name"].upper() == "NR" for field in insertable_fields)
-    pred_det_nr = None
-    if has_nr_column:
-        pred_det_nr = (
-            int(pred_det_nr_value)
-            if pred_det_nr_value is not None
-            else _get_next_pred_det_nr(cursor)
-        )
+    pred_det_nr = _get_next_pred_det_nr(cursor) if has_nr_column else None
     columns: list[str] = []
     values: list[Any] = []
     missing_required: list[str] = []
@@ -2032,7 +2025,6 @@ def _execute_produce_pachet_once(cursor: Any, request: ProducePachetInput) -> di
         cod_pachet_db=cod_pachet_db,
         miscari_doc_id=miscari_doc_id,
         nr_doc=nr_doc,
-        pred_det_nr_value=nr_doc,
     )
     articole_stoc_updated = False
     if _articole_has_stoc_column(cursor):
