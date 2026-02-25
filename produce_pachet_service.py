@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
+import re
 from typing import Any
 
 try:
@@ -420,6 +421,7 @@ INSERT INTO MISCARI (
 
 _MONEY_Q = Decimal("0.0001")
 _VALID_TVA = {Decimal("0"), Decimal("11"), Decimal("21")}
+_INT_COUNTER_RE = re.compile(r"^[+-]?\d+$")
 
 
 @dataclass(frozen=True)
@@ -993,25 +995,29 @@ def _get_next_pred_det_counter(cursor: Any, column_name: str) -> int:
 
     field_type = int(target_field.get("field_type") or 0)
     if field_type in {7, 8, 10, 16, 23, 27}:
-        cursor.execute(f"SELECT COALESCE(MAX({column_upper}), 0) FROM PRED_DET")
+        cursor.execute(
+            f"SELECT COALESCE(MAX({_quote_identifier(column_upper)}), 0) FROM {_quote_identifier('PRED_DET')}"
+        )
     else:
         # Some schemas define NR/NR_DOC as CHAR/VARCHAR.
-        # In that case MAX() is lexical ('9' > '37'), so parse only numeric values.
+        # SQL MAX() is lexical in that case ('9' > '37'), so we parse values numerically in Python.
         cursor.execute(
-            f"""
-SELECT COALESCE(
-    MAX(
-        CASE
-            WHEN TRIM({column_upper}) SIMILAR TO '[0-9]+'
-                THEN CAST(TRIM({column_upper}) AS INTEGER)
-            ELSE NULL
-        END
-    ),
-    0
-)
-FROM PRED_DET
-""".strip()
+            f"SELECT {_quote_identifier(column_upper)} FROM {_quote_identifier('PRED_DET')}"
         )
+        current_max = 0
+        for row in cursor.fetchall():
+            raw_value = row[0] if row else None
+            if raw_value is None:
+                continue
+            text_value = str(raw_value).strip()
+            if not text_value:
+                continue
+            if not _INT_COUNTER_RE.match(text_value):
+                continue
+            parsed = int(text_value)
+            if parsed > current_max:
+                current_max = parsed
+        return current_max + 1
 
     current_max = int(cursor.fetchone()[0] or 0)
     return current_max + 1
