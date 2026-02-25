@@ -826,9 +826,7 @@ def _get_next_document_nr(cursor: Any, data_doc: date) -> int:
     if "NR" in pred_columns:
         return _get_next_pred_det_nr(cursor)
     if "NR_DOC" in pred_columns:
-        cursor.execute(SQL_QUERIES["select_max_pred_det_nr_doc"])
-        current_max = int(cursor.fetchone()[0] or 0)
-        return current_max + 1
+        return _get_next_pred_det_nr_doc(cursor)
     return getNextNrDoc(cursor, data_doc)
 
 
@@ -973,7 +971,48 @@ def _get_next_miscari_id(cursor: Any) -> int:
 
 
 def _get_next_pred_det_nr(cursor: Any) -> int:
-    cursor.execute(SQL_QUERIES["select_max_pred_det_nr"])
+    return _get_next_pred_det_counter(cursor, "NR")
+
+
+def _get_next_pred_det_nr_doc(cursor: Any) -> int:
+    return _get_next_pred_det_counter(cursor, "NR_DOC")
+
+
+def _get_next_pred_det_counter(cursor: Any, column_name: str) -> int:
+    column_upper = str(column_name).strip().upper()
+    if column_upper not in {"NR", "NR_DOC"}:
+        raise RuntimeError(f"Unsupported PRED_DET counter column: {column_name}")
+
+    pred_fields = _get_relation_fields(cursor, "PRED_DET")
+    target_field = next(
+        (field for field in pred_fields if str(field["name"]).upper() == column_upper),
+        None,
+    )
+    if target_field is None:
+        raise RuntimeError(f"PRED_DET column '{column_upper}' was not found.")
+
+    field_type = int(target_field.get("field_type") or 0)
+    if field_type in {7, 8, 10, 16, 23, 27}:
+        cursor.execute(f"SELECT COALESCE(MAX({column_upper}), 0) FROM PRED_DET")
+    else:
+        # Some schemas define NR/NR_DOC as CHAR/VARCHAR.
+        # In that case MAX() is lexical ('9' > '37'), so parse only numeric values.
+        cursor.execute(
+            f"""
+SELECT COALESCE(
+    MAX(
+        CASE
+            WHEN TRIM({column_upper}) SIMILAR TO '[0-9]+'
+                THEN CAST(TRIM({column_upper}) AS INTEGER)
+            ELSE NULL
+        END
+    ),
+    0
+)
+FROM PRED_DET
+""".strip()
+        )
+
     current_max = int(cursor.fetchone()[0] or 0)
     return current_max + 1
 
